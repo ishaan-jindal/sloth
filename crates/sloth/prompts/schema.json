@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "subject": {
+      "type": "string",
+      "description": "The single commit subject line, matching this repository's convention."
+    },
+    "body": {
+      "type": "string",
+      "description": "Optional commit body. Empty string if this repository does not use commit bodies."
+    }
+  },
+  "required": [
+    "subject",
+    "body"
+  ],
+  "additionalProperties": false
+}
