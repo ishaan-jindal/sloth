@@ -47,6 +47,8 @@ pub struct BodyMetrics {
     pub heading_rate: f64,
     /// Median word count of prose bodies (0 when there are none).
     pub median_words: usize,
+    /// 90th percentile word count of prose bodies (0 when there are none).
+    pub p90_words: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -83,6 +85,8 @@ pub struct Style {
     pub body_heading_usage: f64,
     /// Median word count across prose bodies.
     pub body_median_words: usize,
+    /// 90th percentile word count across prose bodies.
+    pub body_p90_words: usize,
     pub repo: String,
     pub n_commits: usize,
     /// True when `SLOTH_STYLE` forced the shape.
@@ -117,6 +121,7 @@ impl Default for Style {
             body_headings: Vec::new(),
             body_heading_usage: 0.0,
             body_median_words: 0,
+            body_p90_words: 0,
             repo: String::new(),
             n_commits: 0,
             forced: false,
@@ -581,6 +586,7 @@ pub fn body_metrics(bodies: &[String]) -> BodyMetrics {
         headings,
         heading_rate: round3(heading_rate),
         median_words: median_int(&word_counts),
+        p90_words: percentile(&word_counts, 90.0),
     }
 }
 
@@ -605,6 +611,7 @@ pub fn mine(repo: &Repo, commits: usize) -> Result<Style, String> {
     style.body_headings = metrics.headings;
     style.body_heading_usage = metrics.heading_rate;
     style.body_median_words = metrics.median_words;
+    style.body_p90_words = metrics.p90_words;
 
     for body in &bodies {
         if body.contains("BREAKING CHANGE") || body.contains("BREAKING-CHANGE") {

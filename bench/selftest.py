@@ -370,6 +370,40 @@ def test_schema_pattern_template_matches_the_rust_implementation():
         assert subject_pattern({"shape": shape}) == expected, shape
 
 
+def test_schema_body_length_is_capped():
+    """The body cap comes from the repository, and is zero where the repository
+    does not use commit bodies. The grammar compiler enforces it, so a body of
+    length zero is not a request, it is an impossibility."""
+    style = {
+        "shape": "conventional",
+        "type_vocab": {"feat": 1},
+        "body_usage": 0.14,
+        "body_words": {"median": 85, "p90": 138},
+    }
+    assert build_schema(style)["properties"]["body"]["maxLength"] == 0
+
+    style["body_usage"] = 0.81
+    style["body_words"] = {"median": 45, "p90": 191}
+    assert build_schema(style)["properties"]["body"]["maxLength"] == 1146
+
+    style["body_words"] = {"median": 1, "p90": 10_000}
+    assert build_schema(style)["properties"]["body"]["maxLength"] == 2000
+
+    style["body_words"] = {"median": 1, "p90": 1}
+    assert build_schema(style)["properties"]["body"]["maxLength"] == 300
+
+
+def test_schema_subject_length_matches_the_conformance_bound():
+    style = {
+        "shape": "conventional",
+        "type_vocab": {"feat": 1},
+        "subject_len": {"median": 30, "p90": 60},
+    }
+    assert build_schema(style)["properties"]["subject"]["maxLength"] == 72
+    style["subject_len"]["p90"] = 100
+    assert build_schema(style)["properties"]["subject"]["maxLength"] == 100
+
+
 def main():
     tests = [
         test_style_conventional,
@@ -399,6 +433,8 @@ def main():
         test_scope_rate_is_mined,
         test_conformance_missing_scope_is_fine_when_repo_rarely_scopes,
         test_schema_pattern_template_matches_the_rust_implementation,
+        test_schema_body_length_is_capped,
+        test_schema_subject_length_matches_the_conformance_bound,
     ]
     for test in tests:
         test()

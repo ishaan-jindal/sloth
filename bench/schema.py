@@ -22,6 +22,11 @@ import re
 
 # Grammar forms that are known to compile and enforce correctly.
 MAX_TYPES = 12
+LENGTH_CEILING = 72
+BODY_USAGE_THRESHOLD = 0.35
+BODY_MIN = 300
+BODY_MAX = 2000
+CHARS_PER_WORD = 6
 
 
 def _types_alternation(style):
@@ -46,6 +51,32 @@ def subject_pattern(style):
     return r"^.{1,72}$"
 
 
+def subject_max_length(style):
+    """The longest subject this repository writes, in characters.
+
+    The same bound the conformance check uses, so the schema and the check
+    agree instead of one being stricter than the other.
+    """
+    p90 = int(((style.get("subject_len") or {}).get("p90")) or 0)
+    return max(LENGTH_CEILING, p90)
+
+
+def body_max_length(style):
+    """How long a body may be, in characters.
+
+    Zero when the repository does not use commit bodies. The grammar compiler
+    enforces `maxLength`, so a body of length zero is not something the model
+    is asked to avoid - it is something the model cannot produce.
+    """
+    usage = float(style.get("body_usage") or 0.0)
+    if usage < BODY_USAGE_THRESHOLD:
+        return 0
+    p90 = int(((style.get("body_words") or {}).get("p90")) or 0)
+    if p90 <= 0:
+        return 1200
+    return max(BODY_MIN, min(BODY_MAX, p90 * CHARS_PER_WORD))
+
+
 def build_schema(style):
     """The JSON schema sent to Ollama as `format` for a given repository."""
     return {
@@ -54,10 +85,12 @@ def build_schema(style):
             "subject": {
                 "type": "string",
                 "pattern": subject_pattern(style),
+                "maxLength": subject_max_length(style),
                 "description": "The single commit subject line, matching this repository's convention.",
             },
             "body": {
                 "type": "string",
+                "maxLength": body_max_length(style),
                 "description": "Optional commit body. Empty string if this repository does not use commit bodies.",
             },
         },

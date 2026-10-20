@@ -363,6 +363,64 @@ rows discarded, so every row in the final results comes from one implementation.
 `bench/xcheck.py` is a runnable check, and it passes. The two miners agree on
 every checked field for all five repositories.
 
+### A10 — latency is measured in a dedicated pass, not during the main run
+T4 is a latency threshold, and the main run is not a quiet machine. While the
+first arm was running, the same box was downloading a 2 GB model, building the
+Rust workspace, and running a cross-implementation check. Those are not idle:
+the arm recorded a p50 of 14.6 s, and some of that is the box's fault, not the
+model's.
+
+T4 is therefore measured in a **dedicated pass on an otherwise idle machine**,
+over the first fifteen cases of each model, with nothing else running. The
+latencies recorded during the main run are reported too, labelled as
+*measured under load*. The threshold itself does not change: p50 at or under 8 s
+and p95 at or under 20 s, and a model that misses it misses it.
+
+This was written down before the quiet pass was run.
+
+### A11 — the body length is a schema constraint, not a request
+The first `qwen2.5-coder:1.5b` arm failed two of its first four cases with
+truncated JSON: the model was cut off mid-string and never closed the object.
+Raising `num_predict` did not help — it just made the model run longer. The
+output showed why: the model had entered a repetition loop, emitting the same
+sentence over and over, and had started inventing issue and pull-request numbers
+in the process — `#1234`, `#5678`, `#9012` — despite the prompt saying "do not
+invent a pull-request or issue number". It was writing a `## What?` body for a
+repository whose bodies average forty-five words, and it never stopped.
+
+`maxLength` in the JSON schema is enforced by the same grammar compiler that
+enforces `pattern`. Measured:
+
+| request | result |
+|---|---|
+| `maxLength: 300` on the body | body came back exactly 300 characters, valid JSON, in 2.1 s |
+| `maxLength: 0` on the body | body came back empty, valid JSON |
+| `pattern` and `maxLength` on the same field | both enforced, valid JSON |
+
+So the body length is now part of the schema, derived from the repository:
+
+- the subject's cap is `max(72, the repository's p90 subject length)`, the same
+  bound the conformance check uses, so the schema and the check agree;
+- the body's cap is zero when the repository's prose-body rate is below 0.35 — a
+  body of length zero is not something the model is asked to avoid, it is
+  something the model cannot produce;
+- otherwise the cap is the repository's p90 body length in words, times six
+  characters a word, bounded to 300–2000 characters.
+
+This is the same principle as the subject pattern, applied to length: the
+repository's habits are enforced by the grammar, and the model is left with
+nothing to get wrong.
+
+The effect on latency is large. The same prompt that took 25–30 s unbounded took
+**1.7–2.1 s** with a capped body, because the grammar prunes the search space
+instead of letting the model run to a repetition loop.
+
+Every row generated before this change used a schema that permitted runaway
+bodies, so **the whole run was discarded and restarted** with the corrected
+schema. The first arm's partial results are not in the final numbers.
+
+
+
 
 
 

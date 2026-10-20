@@ -76,6 +76,11 @@ def main():
     ap.add_argument("--fidelity", default=str(BENCH / "fidelity.jsonl"))
     ap.add_argument("--judgments", default=str(BENCH / "judgments.jsonl"))
     ap.add_argument("--cases", default=str(BENCH / "cases.jsonl"))
+    ap.add_argument(
+        "--latency",
+        default=str(BENCH / "latency.jsonl"),
+        help="the dedicated idle latency pass; T4 is scored from this",
+    )
     ap.add_argument("--out-json", default=str(BENCH / "summary.json"))
     ap.add_argument("--out-md", default=str(BENCH / "REPORT.md"))
     ap.add_argument(
@@ -104,6 +109,14 @@ def main():
     by_model = {}
     for r in results:
         by_model.setdefault(r.get("model", "?"), []).append(r)
+
+    # The dedicated idle latency pass. T4 is scored from this; the latencies in
+    # the main run were measured while the box was also doing other work.
+    latency_pass = read_jsonl(a.latency)
+    lat_by = {}
+    for r in latency_pass:
+        if r.get("status") == "ok" and r.get("latency_s") is not None:
+            lat_by.setdefault(r.get("model", "?"), []).append(r["latency_s"])
 
     fid_by = {}
     for f in fidelity:
@@ -148,6 +161,7 @@ def main():
             )
         ]
         lat = [r["latency_s"] for r in ok if r.get("latency_s") is not None]
+        quiet_lat = lat_by.get(model, [])
         fid = fid_by.get(model, [])
         clean = [f for f in fid if f.get("clean")]
         body_ok = [f for f in fid if f.get("body_status") == "ok"]
@@ -184,7 +198,8 @@ def main():
             "body_duplicates_subject_rate": round(len(dup_body) / len(fid), 4)
             if fid
             else None,
-            "latency": latency_stats(lat),
+            "latency_under_load": latency_stats(lat),
+            "latency_quiet": latency_stats(quiet_lat),
             "judged_pairs": len(decided),
             "win_rate_vs_human": round(len(wins) / len(decided), 4)
             if decided
@@ -207,10 +222,16 @@ def main():
         m["T3"] = (
             m["win_rate_vs_human"] is not None and m["win_rate_vs_human"] >= T3_WIN_RATE
         )
+        # T4 is scored from the dedicated idle pass. If that pass has not been
+        # run for this model, fall back to the main run's latencies and say so.
+        quiet = m["latency_quiet"]
+        scored = quiet if quiet else m["latency_under_load"]
+        m["latency"] = scored
+        m["latency_source"] = "idle pass" if quiet else "main run (under load)"
         m["T4"] = (
-            bool(lat)
-            and m["latency"].get("p50", 1e9) <= T4_LATENCY_MEDIAN
-            and m["latency"].get("p95", 1e9) <= T4_LATENCY_P95
+            bool(scored)
+            and scored.get("p50", 1e9) <= T4_LATENCY_MEDIAN
+            and scored.get("p95", 1e9) <= T4_LATENCY_P95
         )
         summary["models"][model] = m
 
@@ -294,6 +315,27 @@ def main():
             f"{'PASS' if m.get('T3') else 'FAIL'} | {'PASS' if m.get('T4') else 'FAIL'} | "
             f"{'-' if m.get('T5') is None else ('PASS' if m.get('T5') else 'FAIL')} |"
         )
+    L.append("\n## Latency\n")
+    L.append(
+        "T4 is scored from the dedicated idle pass. The main run's latencies are "
+        "shown for comparison: that box was also downloading models and building the "
+        "Rust workspace while it ran.\n"
+    )
+    L.append(
+        "| model | idle p50 | idle p95 | under load p50 | under load p95 | n idle |"
+    )
+    L.append("|---|---|---|---|---|---|")
+    for model, m in sorted(
+        summary["models"].items(),
+        key=lambda kv: (kv[0] == "baseline", kv[1].get("params_b") or 1e9),
+    ):
+        q = m.get("latency_quiet") or {}
+        u = m.get("latency_under_load") or {}
+        L.append(
+            f"| `{model}` | {q.get('p50', '-')} | {q.get('p95', '-')} | "
+            f"{u.get('p50', '-')} | {u.get('p95', '-')} | {q.get('n', 0)} |"
+        )
+
     L.append("\n## Failure modes\n")
     L.append("| model | bad_output | error | over_budget |")
     L.append("|---|---|---|---|")

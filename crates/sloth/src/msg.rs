@@ -22,6 +22,9 @@ pub const HARD_CHECKS: [&str; 6] = [
     "non_empty",
 ];
 pub const LENGTH_CEILING: usize = 72;
+pub const BODY_MIN: usize = 300;
+pub const BODY_MAX: usize = 2000;
+pub const CHARS_PER_WORD: usize = 6;
 
 const PAST_TENSE: [&str; 32] = [
     "added",
@@ -142,17 +145,48 @@ fn subject_pattern(style: &Style) -> Option<String> {
     }
 }
 
-/// Build the structured-output schema for this repository. The freeform case
-/// starts from the embedded static schema (the fallback); every structured shape
-/// gets a runtime pattern that makes a non-conforming subject unreachable.
+/// The longest subject this repository writes, in characters. The same bound
+/// the conformance check uses, so the schema and the check agree.
+pub fn subject_max_length(style: &Style) -> usize {
+    LENGTH_CEILING.max(style.subject_len.p90)
+}
+
+/// How long a body may be, in characters.
+///
+/// Zero when the repository does not use commit bodies. The grammar compiler
+/// enforces `maxLength`, so a body of length zero is not something the model is
+/// asked to avoid - it is something the model cannot produce.
+pub fn body_max_length(style: &Style) -> usize {
+    if style.body_usage < BODY_USAGE_THRESHOLD {
+        return 0;
+    }
+    let p90 = style.body_p90_words;
+    if p90 == 0 {
+        return 1200;
+    }
+    BODY_MIN.max(BODY_MAX.min(p90 * CHARS_PER_WORD))
+}
+
+/// Build the structured-output schema for this repository.
+///
+/// The `pattern` and the `maxLength` bounds are enforced by the model server's
+/// grammar compiler, not checked afterwards: a subject that breaks the
+/// repository's convention is unreachable, and a body that is too long cannot
+/// be written at all.
 pub fn schema_for(style: &Style) -> Value {
     let Some(pattern) = subject_pattern(style) else {
         return static_schema();
     };
+    let subject_max = subject_max_length(style);
+    let body_max = body_max_length(style);
     if style.shape == "freeform" {
         let mut schema = static_schema();
         if let Some(subject) = schema.pointer_mut("/properties/subject") {
             subject["pattern"] = Value::String(pattern);
+            subject["maxLength"] = json!(subject_max);
+        }
+        if let Some(body) = schema.pointer_mut("/properties/body") {
+            body["maxLength"] = json!(body_max);
         }
         return schema;
     }
@@ -162,11 +196,13 @@ pub fn schema_for(style: &Style) -> Value {
             "subject": {
                 "type": "string",
                 "description": "The single commit subject line, matching this repository's convention.",
-                "pattern": pattern
+                "pattern": pattern,
+                "maxLength": subject_max
             },
             "body": {
                 "type": "string",
-                "description": "Optional commit body. Empty string if this repository does not use commit bodies."
+                "description": "Optional commit body. Empty string if this repository does not use commit bodies.",
+                "maxLength": body_max
             }
         },
         "required": ["subject", "body"],
@@ -1020,6 +1056,45 @@ mod tests {
             .find(|check| check.name == name)
             .map(|check| !check.pass)
             .unwrap_or(false)
+    }
+
+    #[test]
+    fn schema_caps_the_body_length() {
+        // A repository that does not use commit bodies gets a cap of zero, so
+        // the model cannot write one. The grammar compiler enforces this.
+        let mut style = style();
+        style.body_usage = 0.14;
+        style.body_p90_words = 85;
+        let schema = schema_for(&style);
+        assert_eq!(schema["properties"]["body"]["maxLength"], json!(0));
+
+        // A repository that does use bodies gets a cap derived from its own
+        // body length, within bounds.
+        style.body_usage = 0.81;
+        style.body_p90_words = 191;
+        let schema = schema_for(&style);
+        assert_eq!(schema["properties"]["body"]["maxLength"], json!(1146));
+
+        style.body_p90_words = 10_000;
+        let schema = schema_for(&style);
+        assert_eq!(schema["properties"]["body"]["maxLength"], json!(BODY_MAX));
+
+        style.body_p90_words = 1;
+        style.body_usage = 0.4;
+        let schema = schema_for(&style);
+        assert_eq!(schema["properties"]["body"]["maxLength"], json!(BODY_MIN));
+    }
+
+    #[test]
+    fn schema_caps_the_subject_length_to_the_same_bound_the_check_uses() {
+        let mut style = style();
+        style.subject_len.p90 = 60;
+        let schema = schema_for(&style);
+        assert_eq!(schema["properties"]["subject"]["maxLength"], json!(72));
+
+        style.subject_len.p90 = 100;
+        let schema = schema_for(&style);
+        assert_eq!(schema["properties"]["subject"]["maxLength"], json!(100));
     }
 
     #[test]
