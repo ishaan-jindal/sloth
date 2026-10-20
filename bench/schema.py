@@ -98,36 +98,3 @@ def build_schema(style):
         "additionalProperties": False,
     }
 
-
-def format_rule(style):
-    """One sentence stating the prefix requirement, for the prompt.
-
-    The schema enforces it; this states it, so the model does not spend its
-    attention discovering the constraint the hard way.
-    """
-    shape = (style.get("shape") or "freeform").lower()
-    if shape == "conventional":
-        vocab = style.get("type_vocab") or {}
-        types = sorted(vocab, key=lambda k: (-vocab[k], k))[:MAX_TYPES]
-        if types:
-            listed = ", ".join(f"`{t}`" for t in types)
-            return (
-                f"The subject MUST begin with one of these type prefixes, followed by a colon: "
-                f"{listed}. A subject without that prefix is invalid. "
-                "Optionally put a scope in parentheses after the type, like `feat(tui):`."
-            )
-        return (
-            "The subject MUST begin with a lowercase type word followed by a colon, like `feat: `. "
-            "A subject without that prefix is invalid."
-        )
-    if shape == "gitmoji":
-        return (
-            "The subject MUST begin with a gitmoji code and a colon, like `:sparkles: `. "
-            "A subject without one is invalid."
-        )
-    if shape == "ticket":
-        return (
-            "The subject MUST begin with a ticket reference such as `PROJ-123`, followed by a colon. "
-            "A subject without one is invalid."
-        )
-    return "Write a single plain subject line, at most 72 characters, with no trailing period."

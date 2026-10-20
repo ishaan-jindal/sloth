@@ -17,7 +17,7 @@ from run import (
     split_template,
     strip_system_payload,
 )
-from schema import build_schema, format_rule, subject_pattern
+from schema import build_schema, subject_pattern
 from style import classify_subjects
 
 CONVENTIONAL_SUBJECTS = [
@@ -309,13 +309,6 @@ def test_schema_shape_is_complete():
     assert "pattern" not in schema["properties"]["body"]
 
 
-def test_format_rule_names_the_types():
-    rule = format_rule({"shape": "conventional", "type_vocab": {"feat": 3, "fix": 2}})
-    assert "`feat`" in rule and "`fix`" in rule, rule
-    assert "MUST" in rule, rule
-    assert "MUST" in format_rule({"shape": "gitmoji"}), "gitmoji needs a stated rule"
-    assert "MUST" in format_rule({"shape": "ticket"}), "ticket needs a stated rule"
-
 
 def test_scope_rate_is_mined():
     style = classify_subjects(
@@ -429,7 +422,6 @@ def main():
         test_schema_pattern_freeform,
         test_schema_pattern_gitmoji_and_ticket,
         test_schema_shape_is_complete,
-        test_format_rule_names_the_types,
         test_scope_rate_is_mined,
         test_conformance_missing_scope_is_fine_when_repo_rarely_scopes,
         test_schema_pattern_template_matches_the_rust_implementation,

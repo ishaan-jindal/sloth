@@ -233,8 +233,12 @@ def prose_body(body):
 
 
 def body_sections(body):
-    """Markdown headings appearing in a body, in order."""
-    return [h.strip() for h in HEADING_RE.findall(body)]
+    """Markdown headings appearing in a body, in order.
+
+    The leading hashes are stripped: the heading text is what the prompt
+    quotes, and the Rust implementation stores it the same way.
+    """
+    return [h.strip().lstrip("#").strip() for h in HEADING_RE.findall(body)]
 
 
 def mine_style(repo_path, commits=300):

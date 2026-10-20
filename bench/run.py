@@ -20,7 +20,7 @@ from pathlib import Path
 
 from baseline import baseline_message
 from conformance import check_message
-from schema import build_schema, format_rule
+from schema import build_schema
 from style import mine_style
 
 BENCH_DIR = Path(__file__).resolve().parent
@@ -96,76 +96,152 @@ def strip_system_payload(template):
     return SYSTEM_PAYLOAD_RE.sub("", template)
 
 
-def _vocab_text(vocab, limit=15):
-    items = sorted((vocab or {}).items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-    return ", ".join(f"{name} ({count})" for name, count in items) or "(none)"
+def _top_vocab(vocab):
+    return sorted((vocab or {}).items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _render_vocab(vocab):
+    return ", ".join(f"{name} ({count})" for name, count in _top_vocab(vocab))
+
+
+def _type_names(style):
+    """The mined type names, capped at twelve, with a standard fallback."""
+    mined = [name for name, _ in _top_vocab(style.get("type_vocab"))][:12]
+    return mined or ["feat", "fix", "chore", "docs", "ci", "test"]
+
+
+def _round_half_up(value):
+    """Rust's `f64::round()`: halfway cases go away from zero."""
+    return int(value + 0.5) if value >= 0 else -int(-value + 0.5)
 
 
 def build_convention(style):
-    shape = style.get("shape", "freeform")
-    confidence = style.get("confidence", "low")
-    rate = (style.get("match_rates") or {}).get(shape, 0.0)
-    text = (
-        f"Detected shape: {shape} (confidence {confidence}, "
-        f"{rate:.0%} of recent commits)."
-    )
-    if shape == "conventional":
-        text += f" Types in use: {_vocab_text(style.get('type_vocab'))}."
-        scopes = style.get("scope_vocab") or {}
-        if scopes:
-            text += f" Scopes in use: {_vocab_text(scopes)}."
-        else:
-            text += " Commits are usually unscoped."
-    elif shape == "gitmoji":
-        text += f" Leading gitmoji used: {_vocab_text(style.get('emoji_vocab'))}."
-    elif shape == "ticket":
-        text += " Subjects start with a ticket token such as `ABC-123`."
-    else:
-        text += " Subjects are freeform; there is no required prefix."
+    """The convention paragraph, worded exactly as the Rust CLI words it.
 
-    body_usage = float(style.get("body_usage") or 0.0)
-    text += f" Bodies are used in {round(body_usage * 100)}% of commits."
-    lengths = style.get("subject_len") or {}
-    text += (
-        f" Subjects have median length {lengths.get('median', 0)} "
-        f"and p90 {lengths.get('p90', 0)}."
-    )
-    if style.get("pr_suffix"):
-        text += " PR suffixes such as `(#1234)` appear in subjects."
+    The benchmark must measure the prompt the tool actually ships. `xcheck.py`
+    compares this text against the Rust implementation for every benchmark
+    repository.
+    """
+    lines = []
+    shape = style.get("shape", "freeform")
+    if shape == "conventional":
+        lines.append(
+            "The repository uses Conventional Commits: `<type>(<scope>): <description>`."
+        )
+        if not style.get("type_vocab"):
+            lines.append(
+                "No type vocabulary was mined; use a standard type such as feat, fix or chore."
+            )
+        else:
+            lines.append(
+                f"Types in use, by frequency: {_render_vocab(style['type_vocab'])}."
+            )
+            type_list = ", ".join(f"`{name}`" for name in _type_names(style))
+            lines.append(
+                "The subject MUST begin with one of these type prefixes, followed by a colon: "
+                f"{type_list}. A subject without that prefix is invalid."
+            )
+        if not style.get("scope_vocab"):
+            lines.append(
+                "The repository does not use scopes; write `type: description`."
+            )
+        else:
+            scope_rate = float(style.get("scope_rate") or 0.0)
+            scope_pct = _round_half_up(scope_rate * 100)
+            scope_rule = (
+                "a scope is required"
+                if scope_rate >= 0.90
+                else "a scope is optional, so use one only when it fits"
+            )
+            lines.append(
+                f"Scopes in use, by frequency: {_render_vocab(style['scope_vocab'])}. "
+                f"{scope_pct}% of conventional commits are scoped; {scope_rule}. "
+                "Do not invent a new scope."
+            )
+        if "!" in (style.get("breaking_markers") or []):
+            lines.append(
+                "Breaking changes use `!` before the colon, e.g. `feat(api)!: drop v1`."
+            )
+    elif shape == "gitmoji":
+        lines.append(
+            "The repository prefixes every subject with a gitmoji shortcode, "
+            "e.g. `:sparkles: add export`."
+        )
+        if style.get("emoji_vocab"):
+            lines.append(
+                f"Emojis in use, by frequency: {_render_vocab(style['emoji_vocab'])}."
+            )
+    elif shape == "ticket":
+        lines.append(
+            "The repository prefixes every subject with an uppercase ticket key, "
+            "e.g. `PROJ-123 add export`."
+        )
     else:
-        text += " PR suffixes do not appear in subjects."
-    text += " " + format_rule(style)
-    return text
+        lines.append(
+            "The repository does not use a structured prefix. Write a plain, "
+            "sentence-style subject with no `type:` prefix and no emoji."
+        )
+    if style.get("pr_suffix"):
+        lines.append(
+            "The history's subjects end with `(#1234)` pull-request tokens. Those numbers were "
+            "stripped from the examples and you cannot know them; never add one."
+        )
+    if style.get("forced"):
+        lines.append("This shape was selected explicitly by SLOTH_STYLE.")
+    if not style.get("n_subjects"):
+        lines.append("There is no commit history to mine yet.")
+    else:
+        rate = (style.get("match_rates") or {}).get(shape, 0.0)
+        pct = _round_half_up(rate * 100)
+        lines.append(
+            f"Mined confidence: {style.get('confidence', 'low')} "
+            f"({pct}% of {style['n_subjects']} non-merge subjects match this shape)."
+        )
+    return "\n".join(lines)
+
+
+def build_exemplars(style):
+    exemplars = style.get("exemplars") or []
+    if not exemplars:
+        return "(no examples of this shape in history)"
+    return "\n".join(f"- {subject}" for subject in exemplars)
+
+
+def build_length_rule(style):
+    if not style.get("n_subjects"):
+        return "Keep the subject to 72 characters or fewer."
+    lengths = style.get("subject_len") or {}
+    p90 = int(lengths.get("p90") or 0)
+    median = int(lengths.get("median") or 0)
+    limit = max(p90, LENGTH_CEILING)
+    return (
+        f"Keep the subject to {limit} characters or fewer "
+        f"(repository median {median}, p90 {p90})."
+    )
 
 
 def build_body_rule(style):
     usage = float(style.get("body_usage") or 0.0)
-    sections = list(style.get("body_sections") or [])
+    pct = _round_half_up(usage * 100)
+    words = int((style.get("body_words") or {}).get("median") or 0)
+    length_note = f" Its bodies are around {words} words long." if words > 0 else ""
     if usage >= 0.35:
-        parts = [
-            f"This repository writes a prose commit body in {round(usage * 100)}% of commits "
-            f"(the rest are sign-off trailers only, which do not count)."
-        ]
-        words = (style.get("body_words") or {}).get("median") or 0
-        if words:
-            parts.append(f"Its bodies are around {words} words long.")
-        if sections:
-            parts.append(
-                "The body uses these section headings, in this order: "
-                + ", ".join(f"`{s}`" for s in sections)
-                + ". Follow that structure exactly, with a short paragraph under each heading."
+        headings = list(style.get("body_sections") or [])
+        if not headings:
+            return (
+                f"This repository writes prose commit bodies ({pct}% of commits): include a short "
+                f"body of plain prose (2-4 lines) only when the change needs explaining."
+                f"{length_note}"
             )
-        else:
-            parts.append(
-                "Write a short body of plain prose (2-4 lines) only when the change needs "
-                "explaining."
-            )
-        parts.append(
-            'If the change needs no explanation, "body" must be an empty string.'
+        structure = ", then ".join(f"`## {heading}`" for heading in headings)
+        return (
+            f"This repository writes prose commit bodies ({pct}% of commits) using this "
+            f"heading structure: {structure}. Follow that structure exactly, with a short "
+            f"paragraph under each heading.{length_note}"
         )
-        return " ".join(parts)
     return (
-        'This repository does not use commit bodies, so "body" must be an empty string.'
+        f"This repository rarely writes prose commit bodies ({pct}% of commits): leave `body` "
+        "as an empty string."
     )
 
 
@@ -178,18 +254,10 @@ def build_values(style, case):
         f"{f.get('add', '0')}/{f.get('del', '0')}\t{str(f.get('path', ''))}"
         for f in files
     )
-    exemplars = style.get("exemplars") or []
-    exemplar_block = "```\n" + "\n".join(exemplars) + "\n```"
-    lengths = style.get("subject_len") or {}
-    median = int(lengths.get("median") or 0)
-    p90 = int(lengths.get("p90") or 0)
     return {
         "CONVENTION": build_convention(style),
-        "EXEMPLARS": exemplar_block,
-        "LENGTH_RULE": (
-            f"Keep the subject at or below {LENGTH_CEILING} characters "
-            f"(this repo's median is {median}, p90 is {p90})."
-        ),
+        "EXEMPLARS": build_exemplars(style),
+        "LENGTH_RULE": build_length_rule(style),
         "BODY_RULE": build_body_rule(style),
         "FILES": files_text,
         "DIFFSTAT": diffstat,
