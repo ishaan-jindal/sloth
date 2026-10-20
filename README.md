@@ -80,17 +80,22 @@ loopback, rather than quietly sending your diff to a remote service.
    It does not silently truncate, and it does not summarise the diff with more
    model calls.
 3. **Constrain the shape.** The JSON schema sent to the model carries a `pattern`
-   for the subject, generated from the mined convention. The model server compiles
-   that pattern into a grammar, so a subject that breaks the repository's
-   convention is *unreachable* rather than merely invalid. The model chooses the
-   words; the shape is not a matter of opinion.
+   for the subject and a `maxLength` for both fields, generated from the mined
+   convention. The model server compiles the schema into a grammar and masks
+   every token that cannot continue a valid value, so a subject that breaks the
+   repository's convention is *unreachable* rather than merely invalid, and a
+   body the repository does not use is not something the model can write at all.
+   The model chooses the words; the shape is not a matter of opinion. Bounding
+   the body also stops a small model from running away in a repetition loop —
+   on this laptop the same prompt took 25 s unbounded and 2 s bounded.
 4. **Generate, then validate.** The model's output is checked against the
    repository's convention. If it fails, one repair call is made with the specific
    failures appended. If that fails too, a deterministic template is offered
    instead — Sloth never blocks your commit.
 5. **Clean up what cannot be known.** A local tool cannot know a pull-request
    number, so any `(#1234)` the model invents is removed. A scope the repository
-   has never used is flagged for you rather than rewritten.
+   has never used is flagged for you rather than rewritten, and so is a subject
+   that names a file path.
 6. **Ask.** Accept, edit, regenerate or cancel. One keypress.
 
 The version bump is computed from the commits — a `!` marker or a
