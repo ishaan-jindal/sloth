@@ -1,0 +1,31 @@
+{
+  "captured": "2026-10-20T19:30:29+05:30",
+  "os": "Linux 7.2.11-arch1-1",
+  "cpu": "11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz",
+  "cores": "8",
+  "memory": "15Gi",
+  "gpu": "none discrete",
+  "ollama": "ollama version is 0.40.6",
+  "models": [
+    {
+      "name": "qwen2.5-coder:1.5b",
+      "id": "d7372fd82851",
+      "size": "986"
+    },
+    {
+      "name": "qwen3:0.6b",
+      "id": "7df6b6e09427",
+      "size": "522"
+    },
+    {
+      "name": "gemma4:e2b",
+      "id": "b37049369adf",
+      "size": "4.6"
+    },
+    {
+      "name": "spike-qwen15b:latest",
+      "id": "28611ff286e7",
+      "size": "1.1"
+    }
+  ]
+}
