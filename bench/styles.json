@@ -1,0 +1,383 @@
+{
+  "matcha": {
+    "shape": "conventional",
+    "confidence": "high",
+    "match_rates": {
+      "conventional": 0.997,
+      "gitmoji": 0.0,
+      "ticket": 0.0,
+      "freeform": 0.003
+    },
+    "breaking_markers": [],
+    "pr_suffix": true,
+    "pr_suffix_pattern": "\\(#\\d+\\)$",
+    "subject_len": {
+      "median": 37,
+      "p90": 47
+    },
+    "n_subjects": 300,
+    "type_vocab": {
+      "chore": 102,
+      "fix": 102,
+      "feat": 53,
+      "docs": 25,
+      "ci": 13,
+      "test": 4
+    },
+    "scope_vocab": {
+      "deps": 40,
+      "tui": 8,
+      "fetcher": 6,
+      "i18n": 5,
+      "daemon": 4,
+      "config": 3,
+      "plugin": 3,
+      "export": 2,
+      "pop3": 2,
+      "sender": 2,
+      "view": 2,
+      "badge": 1,
+      "cache": 1,
+      "cli": 1,
+      "clib": 1,
+      "composer": 1,
+      "daemonclient": 1,
+      "editor": 1,
+      "gitmail": 1,
+      "gmail": 1,
+      "imap": 1,
+      "inbox": 1,
+      "jmap": 1,
+      "nix": 1,
+      "reply": 1,
+      "search": 1,
+      "settings": 1,
+      "threading": 1,
+      "ui": 1,
+      "update": 1
+    },
+    "scope_rate": 0.321,
+    "body_usage": 0.813,
+    "body_trailer_rate": 0.033,
+    "body_words": {
+      "median": 45,
+      "p90": 191
+    },
+    "body_sections": [
+      "## What?",
+      "## Why?"
+    ],
+    "body_section_rate": 0.811,
+    "exemplar_raw": [
+      "feat(export): add Save-as format picker",
+      "feat(export): add EML email export",
+      "fix: Flatpak signing key (#1745)",
+      "fix(i18n): arabic dual vs 3-10 plurals (#1732)",
+      "docs: update demo.gif (#1737)"
+    ],
+    "exemplars": [
+      "feat(export): add Save-as format picker",
+      "feat(export): add EML email export",
+      "fix: Flatpak signing key",
+      "fix(i18n): arabic dual vs 3-10 plurals",
+      "docs: update demo.gif"
+    ],
+    "sample_subjects": [
+      "feat(export): add Save-as format picker",
+      "feat(export): add EML email export",
+      "fix: Flatpak signing key (#1745)",
+      "fix(i18n): arabic dual vs 3-10 plurals (#1732)",
+      "docs: update demo.gif (#1737)",
+      "chore: update flake.lock (#1730)",
+      "chore: sync gomod2nix.toml (#1729)",
+      "fix(jmap): helper to find inbox name (#1736)",
+      "fix: custom keybinds in help line (#1735)",
+      "feat(i18n): complete Spanish (#1733)",
+      "chore(deps): github.com/floatpane/bubble-overlay ^ v0.3.0 (#1728)",
+      "chore: update flake.lock (#1721)"
+    ],
+    "repo": "/home/sacred/Dev/matcha",
+    "n_commits": 300
+  },
+  "runnix": {
+    "shape": "conventional",
+    "confidence": "high",
+    "match_rates": {
+      "conventional": 1.0,
+      "gitmoji": 0.0,
+      "ticket": 0.0,
+      "freeform": 0.0
+    },
+    "breaking_markers": [],
+    "pr_suffix": false,
+    "pr_suffix_pattern": "\\(#\\d+\\)$",
+    "subject_len": {
+      "median": 49,
+      "p90": 72
+    },
+    "n_subjects": 28,
+    "type_vocab": {
+      "docs": 9,
+      "chore": 7,
+      "feat": 6,
+      "ci": 3,
+      "fix": 3
+    },
+    "scope_rate": 0.0,
+    "body_usage": 0.143,
+    "body_trailer_rate": 0.857,
+    "body_words": {
+      "median": 85,
+      "p90": 138
+    },
+    "body_sections": [],
+    "body_section_rate": 0.0,
+    "exemplars": [
+      "docs: changelog stale-queued reaper entry",
+      "ci: gate on coverage and tighten sqlc check",
+      "fix: reap stale queued executions",
+      "chore: ignore deepwork scratch state",
+      "docs: enforce reword before stacking merges"
+    ],
+    "sample_subjects": [
+      "docs: changelog stale-queued reaper entry",
+      "ci: gate on coverage and tighten sqlc check",
+      "fix: reap stale queued executions",
+      "chore: ignore deepwork scratch state",
+      "docs: enforce reword before stacking merges",
+      "fix: close sandbox wait race and fail fast in ci",
+      "ci: harden workflows and cross-compile images",
+      "chore: phase 3 replace chi with stdlib mux",
+      "chore: phase 2 drop speculative metrics endpoint",
+      "chore: phase 1 dead-code and interface cuts",
+      "docs: remove legacy and kubernetes mentions and tighten readme",
+      "docs: prohibit agent attribution in commits and PRs"
+    ],
+    "repo": "/home/sacred/Dev/runnix",
+    "n_commits": 28
+  },
+  "vaults-hub": {
+    "shape": "conventional",
+    "confidence": "high",
+    "match_rates": {
+      "conventional": 0.934,
+      "gitmoji": 0.0,
+      "ticket": 0.0,
+      "freeform": 0.066
+    },
+    "breaking_markers": [],
+    "pr_suffix": false,
+    "pr_suffix_pattern": "\\(#\\d+\\)$",
+    "subject_len": {
+      "median": 62,
+      "p90": 70
+    },
+    "n_subjects": 61,
+    "type_vocab": {
+      "refactor": 16,
+      "docs": 11,
+      "feat": 8,
+      "fix": 8,
+      "test": 6,
+      "chore": 4,
+      "ci": 3,
+      "build": 1
+    },
+    "scope_vocab": {
+      "vaults": 20,
+      "launcher": 5,
+      "changelog": 4,
+      "readme": 2,
+      "release": 2,
+      "agents": 1,
+      "config": 1,
+      "contributing": 1,
+      "deps": 1,
+      "install": 1,
+      "packaging": 1,
+      "skill": 1,
+      "smoke": 1
+    },
+    "scope_rate": 0.719,
+    "body_usage": 0.475,
+    "body_trailer_rate": 0.492,
+    "body_words": {
+      "median": 50,
+      "p90": 149
+    },
+    "body_sections": [],
+    "body_section_rate": 0.0,
+    "exemplars": [
+      "chore(release): bump to 0.3.0",
+      "feat(install): add multi-client installer and vaults-sync skill",
+      "docs(changelog): note vaults-hub SKILL.md",
+      "feat(skill): add vaults-hub SKILL.md plug-and-go guide",
+      "chore(release): bump to 0.2.1"
+    ],
+    "sample_subjects": [
+      "chore(release): bump to 0.3.0",
+      "feat(install): add multi-client installer and vaults-sync skill",
+      "docs(changelog): note vaults-hub SKILL.md",
+      "feat(skill): add vaults-hub SKILL.md plug-and-go guide",
+      "chore(release): bump to 0.2.1",
+      "refactor: shrink single-use helpers and duplicate tails",
+      "docs(changelog): note history, versioning, delete and tag changes",
+      "ci: drop the first-publish bootstrap notes now that 0.2.0 is on npm",
+      "refactor(launcher): fold the probe builder and import check into one helper each",
+      "test(launcher): drive the installed bin through the mcp stdio client",
+      "test(vaults): hide ripgrep with a git-only PATH",
+      "refactor(vaults): resolve the env and default vaults root in one place"
+    ],
+    "repo": "/home/sacred/Dev/vaults-hub",
+    "n_commits": 61
+  },
+  "termchat": {
+    "shape": "conventional",
+    "confidence": "medium",
+    "match_rates": {
+      "conventional": 0.747,
+      "gitmoji": 0.0,
+      "ticket": 0.0,
+      "freeform": 0.253
+    },
+    "breaking_markers": [],
+    "pr_suffix": false,
+    "pr_suffix_pattern": "\\(#\\d+\\)$",
+    "subject_len": {
+      "median": 51,
+      "p90": 68
+    },
+    "n_subjects": 178,
+    "type_vocab": {
+      "feat": 52,
+      "fix": 24,
+      "build": 11,
+      "chore": 11,
+      "docs": 11,
+      "refactor": 9,
+      "ci": 8,
+      "test": 4,
+      "update": 3
+    },
+    "scope_vocab": {
+      "cli": 55,
+      "server": 14,
+      "deps": 11,
+      "api": 3,
+      "workflow": 3,
+      "shared": 2,
+      "changelog": 1,
+      "chat": 1,
+      "docs": 1,
+      "nick": 1,
+      "npm": 1,
+      "release": 1,
+      "tui": 1,
+      "websocket": 1
+    },
+    "scope_rate": 0.722,
+    "body_usage": 0.253,
+    "body_trailer_rate": 0.343,
+    "body_words": {
+      "median": 22,
+      "p90": 33
+    },
+    "body_sections": [],
+    "body_section_rate": 0.0,
+    "exemplars": [
+      "chore(docs): update AGENTS.md to never add AI attribution",
+      "feat(cli): harden whisper reply target and tests",
+      "feat(server): harden whisper delivery and tests",
+      "docs: expand whisper changelog entry",
+      "feat(cli): paint whisper nicks in the displayed user color"
+    ],
+    "sample_subjects": [
+      "chore(docs): update AGENTS.md to never add AI attribution",
+      "release v2.5.0 (#44)",
+      "feat(cli): harden whisper reply target and tests",
+      "feat(server): harden whisper delivery and tests",
+      "docs: expand whisper changelog entry",
+      "feat(cli): paint whisper nicks in the displayed user color",
+      "feat(cli): declarative command aliases; /w becomes alias of /msg",
+      "feat(cli): display whisper nicks with @ prefix",
+      "feat(cli): per-alias whisper usage hint; document whisper commands",
+      "feat(cli): add /w alias and whisper nick completion",
+      "feat(chat): private whispers via /msg and /r",
+      "build(deps): bump github.com/charmbracelet/x/ansi from 0.11.6 to 0.11.8"
+    ],
+    "repo": "/home/sacred/Dev/Termchat/termchat",
+    "n_commits": 178
+  },
+  "portfolio-website": {
+    "shape": "freeform",
+    "confidence": "low",
+    "match_rates": {
+      "conventional": 0.457,
+      "gitmoji": 0.0,
+      "ticket": 0.0,
+      "freeform": 0.543
+    },
+    "breaking_markers": [],
+    "pr_suffix": false,
+    "pr_suffix_pattern": "\\(#\\d+\\)$",
+    "subject_len": {
+      "median": 16,
+      "p90": 40
+    },
+    "n_subjects": 81,
+    "type_vocab": {
+      "chore": 14,
+      "feat": 11,
+      "fix": 4,
+      "refactor": 4,
+      "ci": 2,
+      "docs": 2
+    },
+    "scope_vocab": {
+      "deps": 3,
+      "cli": 2,
+      "easter-eggs": 2,
+      "lib": 2,
+      "readme": 2,
+      "workflows": 2,
+      "admin": 1,
+      "config": 1,
+      "modal": 1,
+      "motion": 1,
+      "proxy": 1,
+      "seo": 1
+    },
+    "scope_rate": 0.514,
+    "body_usage": 0.198,
+    "body_trailer_rate": 0.296,
+    "body_words": {
+      "median": 25,
+      "p90": 87
+    },
+    "body_sections": [],
+    "body_section_rate": 0.0,
+    "exemplars": [
+      "Bump @tailwindcss/postcss from 4.1.18 to 4.3.3",
+      "Bump actions/setup-node from 4 to 7",
+      "Bump tailwindcss from 4.1.18 to 4.3.3",
+      "Bump framer-motion from 12.26.2 to 13.3.0",
+      "Bump @types/node from 20.19.29 to 26.6.1"
+    ],
+    "sample_subjects": [
+      "feat(seo): add indexable project pages and harden metadata",
+      "ci(workflows): scope npm audit gate to prod dependencies",
+      "docs(readme): fix unclosed fence around project tree",
+      "docs(readme): drop deleted admin, auth and asset references",
+      "chore(lib): remove orphaned rate limiter",
+      "ci(workflows): drop deleted admin env from build",
+      "chore(deps): drop unused jose",
+      "chore(config): trim css, eslint ignores and dead assets",
+      "refactor(lib): use local-only quotes and window-only rate limit",
+      "refactor(modal): use native dialog and shared stagger helpers",
+      "refactor(motion): drop Flicker and CountUp, dedupe header and chaos triggers",
+      "refactor(cli): drop secret command engine and dead palette"
+    ],
+    "repo": "/home/sacred/Dev/portfolio-website",
+    "n_commits": 81
+  }
+}
