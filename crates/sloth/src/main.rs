@@ -4,6 +4,7 @@ use sloth::git::Repo;
 use sloth::model::{self, Client};
 use sloth::msg::{self, Check, Conformance};
 use sloth::release::{self, Bump, TagScheme};
+use sloth::server;
 use sloth::style::{self, Style};
 use sloth::ui;
 use std::fs;
@@ -193,6 +194,23 @@ fn fallback(mined: &Style, digest: &Digest) -> Suggestion {
     }
 }
 
+/// Print what the model is doing, then the elapsed time when it returns.
+/// `label` is the whole action phrase, e.g. "asking qwen2.5-coder:1.5b".
+fn ask_model(
+    client: &Client,
+    system: &str,
+    user: &str,
+    schema: &serde_json::Value,
+    temperature: f64,
+    label: &str,
+) -> Result<String, String> {
+    eprint!("sloth: {label}...");
+    let started = std::time::Instant::now();
+    let result = client.chat(system, user, schema, temperature);
+    eprintln!(" done in {:.1}s", started.elapsed().as_secs_f64());
+    result
+}
+
 fn generate(
     client: &Client,
     schema: &serde_json::Value,
@@ -206,7 +224,14 @@ fn generate(
         user = msg::add_nudge(&user, nudge);
     }
 
-    let first = match client.chat(&prompt.system, &user, schema, model::TEMPERATURE) {
+    let first = match ask_model(
+        client,
+        &prompt.system,
+        &user,
+        schema,
+        model::TEMPERATURE,
+        &format!("asking {}", client.model()),
+    ) {
         Ok(content) => content,
         Err(error) => {
             eprintln!("sloth: warning: model call failed: {error}");
@@ -229,11 +254,13 @@ fn generate(
                 first_error.summary()
             );
             let repair_user = format!("{user}{}", first_error.repair_text());
-            match client.chat(
+            match ask_model(
+                client,
                 &prompt.system,
                 &repair_user,
                 schema,
                 model::REPAIR_TEMPERATURE,
+                "repairing the message",
             ) {
                 Ok(content) => match interpret(&content, mined, digest) {
                     Ok(attempt) => Suggestion {
@@ -296,6 +323,10 @@ fn commit(config: &Config, amend: bool, dry_run: bool) -> Result<(), String> {
 
     let prompt = msg::build_prompt(&mined, &digest);
     diff::enforce_budget(&prompt.full_text(), model::NUM_CTX, model::NUM_PREDICT)?;
+    if let Err(warning) = server::ensure_running(&config.url) {
+        // Never block the commit on the model: the template fallback still works.
+        eprintln!("sloth: warning: {warning}");
+    }
     let client = Client::new(&config.url, &config.model);
     let schema = msg::schema_for(&mined);
     let mut nudge_index = 0usize;
@@ -454,6 +485,9 @@ fn release(config: &Config, explicit_version: Option<String>, dry_run: bool) -> 
     let highlights = if commits.is_empty() {
         None
     } else {
+        if let Err(warning) = server::ensure_running(&config.url) {
+            eprintln!("sloth: warning: {warning}");
+        }
         match release::generate_highlights(&client, &commits, &new_tag) {
             Ok(highlights) => Some(highlights),
             Err(error) => {

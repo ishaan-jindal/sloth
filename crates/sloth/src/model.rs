@@ -131,7 +131,7 @@ impl Client {
     }
 }
 
-fn host_of(url: &str) -> Option<&str> {
+pub(crate) fn host_of(url: &str) -> Option<&str> {
     let (_, rest) = url.split_once("://")?;
     let authority = rest.split('/').next()?;
     let authority = authority.rsplit('@').next().unwrap_or(authority);
@@ -164,18 +164,25 @@ pub fn validate_endpoint(url: &str, allow_remote: bool) -> Result<(), String> {
     let Some(host) = host_of(url) else {
         return Err(format!("SLOTH_URL has no host: {url:?}"));
     };
-    let loopback = matches!(
-        host.to_ascii_lowercase().as_str(),
-        "127.0.0.1" | "::1" | "localhost"
-    );
-    if !loopback && !allow_remote {
-        return Err(format!(
-            "refusing to send your code to {host:?}: sloth's privacy guarantee only holds for a \
-             loopback endpoint (127.0.0.1, ::1 or localhost). To opt in explicitly, set \
-             SLOTH_ALLOW_REMOTE=1."
-        ));
+    if !is_loopback(host) && !allow_remote {
+        return Err(remote_refusal(host));
     }
     Ok(())
+}
+
+pub(crate) fn is_loopback(host: &str) -> bool {
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "::1" | "localhost"
+    )
+}
+
+pub(crate) fn remote_refusal(host: &str) -> String {
+    format!(
+        "refusing to send your code to {host:?}: sloth's privacy guarantee only holds for a \
+         loopback endpoint (127.0.0.1, ::1 or localhost). To opt in explicitly, set \
+         SLOTH_ALLOW_REMOTE=1."
+    )
 }
 
 #[cfg(test)]
