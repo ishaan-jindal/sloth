@@ -14,6 +14,7 @@ from baseline import baseline_message
 from conformance import check_message
 from run import (
     MAX_NUM_CTX,
+    build_convention,
     build_digest,
     build_map_user,
     build_payload,
@@ -801,6 +802,52 @@ def test_schema_subject_length_matches_the_conformance_bound():
     assert build_schema(style)["properties"]["subject"]["maxLength"] == 100
 
 
+def test_prompt_templates_are_byte_identical():
+    """The CLI embeds crates/sloth/prompts/commit.md; the harness reads
+    bench/prompts/commit.md. Two copies of one template: if they drift, the
+    benchmark stops measuring the prompt the tool ships. `xcheck.py` also
+    compares them; this catches it when only the selftest is run."""
+    here = Path(__file__).resolve().parent
+    bench = (here / "prompts" / "commit.md").read_text()
+    rust = (here.parent / "crates" / "sloth" / "prompts" / "commit.md").read_text()
+    if bench == rust:
+        return
+    for line_no, (bench_line, rust_line) in enumerate(
+        zip(bench.splitlines(), rust.splitlines()), 1
+    ):
+        assert bench_line == rust_line, (
+            f"prompt templates differ at line {line_no}: "
+            f"bench={bench_line!r} rust={rust_line!r}"
+        )
+    assert False, "prompt templates differ in line count or trailing newline"
+
+
+def test_convention_states_the_prefix_even_with_no_mined_types():
+    """A repository whose history yielded no type vocabulary still needs the
+    rule stated: the subject must carry a type. The Rust CLI says this
+    unconditionally, and the harness must say the same thing, or the two
+    implementations drift on a path the benchmark repos never exercise.
+    """
+    style = {
+        "shape": "conventional",
+        "type_vocab": {},
+        "scope_vocab": {},
+        "scope_rate": 0.0,
+        "n_subjects": 10,
+        "confidence": "low",
+        "match_rates": {"conventional": 1.0},
+    }
+    text = build_convention(style)
+    assert "MUST begin with one of these type prefixes" in text, text
+    assert "`feat`" in text, text
+    assert "No type vocabulary was mined" in text, text
+    # and with a vocabulary, the mined types are what gets named
+    style["type_vocab"] = {"feat": 3, "fix": 1}
+    text = build_convention(style)
+    assert "`feat`" in text and "`fix`" in text, text
+    assert "Types in use, by frequency" in text, text
+
+
 def main():
     tests = [
         test_style_conventional,
@@ -842,6 +889,8 @@ def main():
         test_schema_pattern_template_matches_the_rust_implementation,
         test_schema_body_length_is_capped,
         test_schema_subject_length_matches_the_conformance_bound,
+        test_prompt_templates_are_byte_identical,
+        test_convention_states_the_prefix_even_with_no_mined_types,
     ]
     for test in tests:
         test()

@@ -507,11 +507,15 @@ def build_convention(style):
             lines.append(
                 f"Types in use, by frequency: {_render_vocab(style['type_vocab'])}."
             )
-            type_list = ", ".join(f"`{name}`" for name in _type_names(style))
-            lines.append(
-                "The subject MUST begin with one of these type prefixes, followed by a colon: "
-                f"{type_list}. A subject without that prefix is invalid."
-            )
+        # The prefix rule is stated unconditionally: even with no mined
+        # vocabulary the model still has to know the subject must carry a type.
+        # The Rust implementation says the same, and lists the standard types
+        # as the fallback.
+        type_list = ", ".join(f"`{name}`" for name in _type_names(style))
+        lines.append(
+            "The subject MUST begin with one of these type prefixes, followed by a colon: "
+            f"{type_list}. A subject without that prefix is invalid."
+        )
         if not style.get("scope_vocab"):
             lines.append(
                 "The repository does not use scopes; write `type: description`."
@@ -963,9 +967,7 @@ def generate_commit(item, model, args, case_schema, user_template):
         "diffstat": item["diffstat"],
         "diff": "\n".join(lines),
     }
-    reduce_user = render_prompt(
-        user_template, build_values(item["style"], digest)
-    )
+    reduce_user = render_prompt(user_template, build_values(item["style"], digest))
     content, taken, error = call_ollama(
         args.base_url,
         model,

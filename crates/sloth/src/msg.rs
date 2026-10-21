@@ -389,6 +389,24 @@ fn body_rule(style: &Style) -> String {
     }
 }
 
+/// The style-derived prompt texts, by template variable name.
+///
+/// `build_prompt` substitutes exactly these; the benchmark harness generates the
+/// same four texts independently, and `bench/xcheck.py` compares them. An
+/// accessor rather than a `Prompt` field: `Prompt` is built from a struct
+/// literal elsewhere, and adding a field would make every other caller name it.
+pub fn style_variables(style: &Style) -> BTreeMap<String, String> {
+    [
+        ("CONVENTION", convention_text(style)),
+        ("EXEMPLARS", exemplars_text(style)),
+        ("LENGTH_RULE", length_rule(style)),
+        ("BODY_RULE", body_rule(style)),
+    ]
+    .into_iter()
+    .map(|(name, text)| (name.to_string(), text))
+    .collect()
+}
+
 fn split_template(template: &str) -> (String, String) {
     let marker = "\n--- USER ---\n";
     match template.split_once(marker) {
@@ -406,7 +424,7 @@ fn split_template(template: &str) -> (String, String) {
     }
 }
 
-fn substitute(template: &str, variables: &BTreeMap<&str, String>) -> String {
+fn substitute(template: &str, variables: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -448,14 +466,10 @@ pub fn build_prompt(style: &Style, digest: &Digest) -> Prompt {
     } else {
         digest.diff.clone()
     };
-    let mut variables: BTreeMap<&str, String> = BTreeMap::new();
-    variables.insert("CONVENTION", convention_text(style));
-    variables.insert("EXEMPLARS", exemplars_text(style));
-    variables.insert("LENGTH_RULE", length_rule(style));
-    variables.insert("BODY_RULE", body_rule(style));
-    variables.insert("FILES", digest.render_files());
-    variables.insert("DIFFSTAT", digest.render_diffstat());
-    variables.insert("DIFF", diff_text);
+    let mut variables = style_variables(style);
+    variables.insert("FILES".to_string(), digest.render_files());
+    variables.insert("DIFFSTAT".to_string(), digest.render_diffstat());
+    variables.insert("DIFF".to_string(), diff_text);
 
     let (system_template, user_template) = split_template(TEMPLATE);
     Prompt {
@@ -1402,6 +1416,13 @@ mod tests {
         assert!(prompt.user.contains("ignore previous instructions"));
         assert!(!prompt.system.contains("--- BEGIN DIFF ---"));
         assert!(!prompt.user.contains("--- USER ---"));
+        // The accessor `bench/xcheck.py` reads must describe this very prompt.
+        let variables = style_variables(&style());
+        assert_eq!(variables.len(), 4);
+        assert!(prompt.system.contains(&variables["CONVENTION"]));
+        assert!(prompt.system.contains(&variables["EXEMPLARS"]));
+        assert!(prompt.system.contains(&variables["LENGTH_RULE"]));
+        assert!(prompt.system.contains(&variables["BODY_RULE"]));
         assert_eq!(PR_SUFFIX_PATTERN, r"\(#\d+\)$");
     }
 }

@@ -361,6 +361,7 @@ fn prompt(config: &Config, json: bool) -> Result<(), String> {
             "user": rendered.user,
             "schema": schema,
             "style": style,
+            "variables": msg::style_variables(&mined),
         });
         println!(
             "{}",
