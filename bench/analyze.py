@@ -11,6 +11,7 @@ script does not get to reinterpret them.
 """
 
 import argparse, json, statistics as st
+from collections import Counter
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -182,9 +183,13 @@ def main():
             "cases_ok": len(ok),
             "cases_bad_output": sum(1 for r in rows if r.get("status") == "bad_output"),
             "cases_error": sum(1 for r in rows if r.get("status") == "error"),
-            "cases_over_budget": sum(
-                1 for r in rows if r.get("status") == "over_budget"
-            ),
+            # The never-refuse strategy means there is no over-budget case: every
+            # case is answered, at level A, B or C.
+            "levels": dict(Counter(r.get("level") or "?" for r in rows)),
+            "compression": {
+                "diff_chars": sum(r.get("diff_chars") or 0 for r in rows),
+                "digest_chars": sum(r.get("digest_chars") or 0 for r in rows),
+            },
             "conformance_pass_rate": round(len(conf_pass) / len(ok), 4) if ok else None,
             "prefix_conformance_pass_rate": round(len(prefix_pass) / len(ok), 4)
             if ok
@@ -337,12 +342,37 @@ def main():
         )
 
     L.append("\n## Failure modes\n")
-    L.append("| model | bad_output | error | over_budget |")
+    L.append("| model | bad_output | error | skipped |")
     L.append("|---|---|---|---|")
     for model, m in sorted(summary["models"].items()):
         L.append(
-            f"| `{model}` | {m['cases_bad_output']} | {m['cases_error']} | {m['cases_over_budget']} |"
+            f"| `{model}` | {m['cases_bad_output']} | {m['cases_error']} | "
+            f"{m['cases_ok'] and sum(v for k, v in m['levels'].items() if k == '?') or 0} |"
         )
+
+    L.append("\n## Diff strategy levels\n")
+    L.append(
+        "Every case is answered. Level A fits the context in one call, level B "
+        "raises the context window, level C summarises the diff in pieces and "
+        "combines them.\n"
+    )
+    L.append("| model | A | B | C |")
+    L.append("|---|---|---|---|")
+    for model, m in sorted(summary["models"].items()):
+        lv = m["levels"]
+        L.append(
+            f"| `{model}` | {lv.get('A', 0)} | {lv.get('B', 0)} | {lv.get('C', 0)} |"
+        )
+    for model, m in sorted(summary["models"].items()):
+        comp = m["compression"]
+        if comp["diff_chars"]:
+            L.append(
+                f"\n`{model}`: the digest sent to the model was "
+                f"{comp['digest_chars']} characters against {comp['diff_chars']} "
+                f"of raw diff "
+                f"({round(100 * comp['digest_chars'] / comp['diff_chars'])}%)."
+            )
+            break
     L.append(
         f"\n**Smallest qualifying model: `{summary['smallest_qualifying'] or 'NONE'}`**"
     )

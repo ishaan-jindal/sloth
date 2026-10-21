@@ -8,12 +8,24 @@ import sys
 
 sys.dont_write_bytecode = True
 
+from pathlib import Path
+
 from baseline import baseline_message
 from conformance import check_message
 from run import (
+    MAX_NUM_CTX,
+    build_digest,
+    build_map_user,
     build_payload,
-    is_over_budget,
+    choose_level,
+    chunk_diff,
+    compress_diff,
+    context_budget,
+    estimate_tokens,
+    fallback_line,
+    map_phase,
     render_prompt,
+    split_diff_blocks,
     split_template,
     strip_system_payload,
 )
@@ -154,11 +166,404 @@ def test_baseline_truncates_long_path():
     assert not message.endswith("."), message
 
 
-def test_budget_oversized():
-    case = {"diff": "x" * 100_000}
-    assert is_over_budget(case, 2000, 40000, 8192) is True
-    assert is_over_budget({"diff": "x" * 100}, 2000, 40000, 8192) is False
-    assert is_over_budget({"diff": "x" * 1000}, 2000, 10**9, 100) is True
+# --------------------------------------------------------------------------- #
+# The diff strategy. The harness must send the prompt the Rust CLI sends, so
+# these checks pin the compression, the level boundaries and the chunking.
+# --------------------------------------------------------------------------- #
+UNIFIED3_SAMPLE = (
+    "diff --git a/app.go b/app.go\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/app.go\n"
+    "+++ b/app.go\n"
+    "@@ -10,6 +10,7 @@ func (m *Model) Update(msg tea.Msg) {\n"
+    " \tctx10\n"
+    " \tctx11\n"
+    "-\told line\n"
+    "+\tnew line\n"
+    "+\textra line\n"
+    " \tctx13\n"
+    " \tctx14\n"
+    " \tctx15\n"
+)
+
+UNIFIED0_SAMPLE = (
+    "diff --git a/app.go b/app.go\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/app.go\n"
+    "+++ b/app.go\n"
+    "@@ -12 +12,2 @@ func (m *Model) Update(msg tea.Msg) {\n"
+    "-\told line\n"
+    "+\tnew line\n"
+    "+\textra line\n"
+)
+
+
+def test_compression_drops_context_and_keeps_hunk_headers():
+    compressed = compress_diff(UNIFIED3_SAMPLE)
+    assert compressed == UNIFIED0_SAMPLE, compressed
+    assert len(compressed) < len(UNIFIED3_SAMPLE), (
+        len(compressed),
+        len(UNIFIED3_SAMPLE),
+    )
+    assert UNIFIED0_SAMPLE.splitlines()[4] in compressed
+    for line in compressed.splitlines():
+        assert not line.startswith(" "), line
+        assert line.strip(), line
+
+
+def test_compression_splits_runs_and_renumbers_hunks():
+    u3 = (
+        "diff --git a/f.txt b/f.txt\n"
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,7 +1,7 @@\n"
+        " ctx1\n"
+        "-old2\n"
+        "+new2\n"
+        " ctx3\n"
+        " ctx4\n"
+        "-old5\n"
+        "+new5\n"
+        " ctx6\n"
+        " ctx7\n"
+    )
+    expected = (
+        "diff --git a/f.txt b/f.txt\n"
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -2 +2 @@\n"
+        "-old2\n"
+        "+new2\n"
+        "@@ -5 +5 @@\n"
+        "-old5\n"
+        "+new5\n"
+    )
+    assert compress_diff(u3) == expected, compress_diff(u3)
+
+
+def test_level_a_digest_fits_and_has_no_context_lines():
+    case = {
+        "files": [{"path": "app.go", "add": "2", "del": "1"}],
+        "diff": UNIFIED3_SAMPLE,
+    }
+    digest = build_digest(case)
+    assert digest["diff"] == UNIFIED0_SAMPLE, digest["diff"]
+    assert digest["files"] == "app.go", digest["files"]
+    assert digest["diffstat"] == "2/1\tapp.go", digest["diffstat"]
+
+    system = "convention rules\n" * 20
+    user = (
+        f"Files:\n{digest['files']}\nDiffstat:\n{digest['diffstat']}\n{digest['diff']}"
+    )
+    level, num_ctx = choose_level(system, user, 8192)
+    assert (level, num_ctx) == ("A", 8192), (level, num_ctx)
+    assert estimate_tokens(user) <= context_budget(num_ctx, system)
+
+
+def test_budget_arithmetic():
+    assert estimate_tokens("x" * 350) == 100
+    assert estimate_tokens("x" * 351) == 101
+    assert context_budget(8192, "x" * 350) == 8192 - 100 - 800
+    assert context_budget(32768, "") == 32768 - 800
+
+
+def test_level_b_raises_context_but_never_past_the_cap():
+    system = "s" * 700  # 200 tokens
+    payload = "d" * 40_000  # 11,429 tokens: too big for 8192, fine for 32768
+    level, num_ctx = choose_level(system, payload, 8192)
+    assert level == "B", level
+    assert 8192 < num_ctx <= MAX_NUM_CTX, num_ctx
+    assert estimate_tokens(payload) <= context_budget(num_ctx, system)
+    assert estimate_tokens(payload) > context_budget(8192, system)
+
+    # An explicit default above the cap is not shrunk.
+    level, num_ctx = choose_level(system, payload, MAX_NUM_CTX * 2)
+    assert (level, num_ctx) == ("A", MAX_NUM_CTX * 2), (level, num_ctx)
+
+
+def _large_case(blocks=12, lines_per_block=8):
+    """Synthetic case whose file blocks are all the same size."""
+    files = []
+    parts = []
+    for i in range(blocks):
+        path = f"src/file{i:03d}.go"
+        files.append({"path": path, "add": str(lines_per_block), "del": "0"})
+        parts.append(
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            f"@@ -1,0 +2,{lines_per_block} @@ func f{i:03d}() {{"
+        )
+        parts.append(
+            "\n".join(f"+line {j:03d} of file {i:03d}" for j in range(lines_per_block))
+        )
+    return {"files": files, "diff": "\n".join(parts) + "\n"}
+
+
+def test_level_c_chunks_each_fit_and_the_count_is_right():
+    case = _large_case()
+    digest = build_digest(case)
+    assert len(split_diff_blocks(digest["diff"])) == 12
+
+    # Tune the budget to three file blocks per chunk (plus one token of slack
+    # for the longer two-digit paths): 12 blocks then need four chunks, and no
+    # arbitrary constant decides that.
+    blocks = split_diff_blocks(digest["diff"])
+    sample = {
+        "paths": [f"src/file{i:03d}.go" for i in range(3)],
+        "headers": [f"@@ -1,0 +2,8 @@ func f{i:03d}() {{" for i in range(3)],
+        "diff": "\n".join("\n".join(block) for block in blocks[:3]),
+    }
+    budget = estimate_tokens(build_map_user(sample)) + 1
+    chunks = chunk_diff(digest["diff"], budget)
+    assert len(chunks) == 4, (len(chunks), [len(c["diff"]) for c in chunks])
+    for index, chunk in enumerate(chunks, 1):
+        prompt = build_map_user(chunk)
+        assert estimate_tokens(prompt) <= budget, (index, estimate_tokens(prompt))
+    covered = [path for chunk in chunks for path in chunk["paths"]]
+    assert covered == [f"src/file{i:03d}.go" for i in range(12)], covered
+
+
+def test_level_c_is_chosen_when_even_the_cap_cannot_hold_the_digest():
+    case = _large_case(blocks=300, lines_per_block=30)
+    digest = build_digest(case)
+    system = "s" * 1000
+    user = digest["files"] + digest["diffstat"] + digest["diff"]
+    level, num_ctx = choose_level(system, user, 8192)
+    assert level == "C", level
+    assert num_ctx == MAX_NUM_CTX, num_ctx
+
+    budget = context_budget(num_ctx, system)
+    chunks = chunk_diff(digest["diff"], budget)
+    assert len(chunks) >= 2, len(chunks)
+    for index, chunk in enumerate(chunks, 1):
+        prompt = build_map_user(chunk)
+        assert estimate_tokens(prompt) <= budget, (index, estimate_tokens(prompt))
+    covered = [path for chunk in chunks for path in chunk["paths"]]
+    assert covered == [f"src/file{i:03d}.go" for i in range(300)], len(covered)
+
+
+def test_map_failure_yields_a_deterministic_line_and_level_c_terminates():
+    chunks = [
+        {"paths": ["src/a.go"], "headers": ["@@ -1 +1 @@ func a() {"], "diff": "+a\n"},
+        {"paths": ["src/b.go"], "headers": ["@@ -5 +5 @@ func b() {"], "diff": "+b\n"},
+    ]
+    calls = []
+
+    def ask(index, chunk):
+        calls.append(index)
+        if index == 1:
+            raise RuntimeError("the model server went away")
+        return "  \n"  # an empty answer is a failure too
+
+    lines, failures = map_phase(chunks, ask)
+    assert calls == [1, 2], calls
+    assert failures == 2, failures
+    assert lines == [fallback_line(chunk) for chunk in chunks], lines
+    assert "src/a.go" in lines[0], lines[0]
+    assert "@@ -1 +1 @@ func a() {" in lines[0], lines[0]
+
+    # Deterministic: the same failed chunk always produces the same line.
+    assert map_phase(chunks, ask) == (lines, failures)
+
+    # The reduce phase has the file list and one line per chunk to work from.
+    summary = "\n".join(lines)
+    assert summary.count("\n") == 1, summary
+    assert "src/a.go" in summary and "src/b.go" in summary, summary
+
+
+def test_map_prompt_carries_paths_and_headers():
+    chunk = {
+        "paths": ["src/a.go"],
+        "headers": ["@@ -1 +1 @@ func a() {"],
+        "diff": "+a\n",
+    }
+    prompt = build_map_user(chunk)
+    assert "src/a.go" in prompt, prompt
+    assert "@@ -1 +1 @@ func a() {" in prompt, prompt
+    assert "+a" in prompt, prompt
+    assert prompt.endswith("--- END DIFF ---"), prompt
+
+
+def test_generate_commit_level_c_terminates_with_a_subject():
+    """End to end for level C with every map call failing: no network involved."""
+    import run as runmod
+
+    class Args:
+        base_url = "http://127.0.0.1:1"
+        timeout = 1.0
+
+    chunks = [
+        {"paths": ["src/a.go"], "headers": ["@@ -1 +1 @@ func a() {"], "diff": "+a\n"},
+        {"paths": ["src/b.go"], "headers": ["@@ -5 +5 @@ func b() {"], "diff": "+b\n"},
+    ]
+    item = {
+        "system": "rules",
+        "user": "",
+        "level": "C",
+        "num_ctx": 32768,
+        "chunk_plans": chunks,
+        "files_text": "src/a.go\nsrc/b.go",
+        "diffstat": "1/0\tsrc/a.go\n1/0\tsrc/b.go",
+        "style": {"shape": "freeform"},
+        "case": {
+            "files": [
+                {"path": "src/a.go", "add": "1", "del": "0"},
+                {"path": "src/b.go", "add": "1", "del": "0"},
+            ]
+        },
+    }
+    user_template = "Files:\n{{FILES}}\n\nDiff:\n{{DIFF}}\n"
+    schema = {"type": "object"}
+    calls = []
+
+    def fake_call(
+        base_url, model, system, user, schema_, num_ctx, timeout, num_predict=768
+    ):
+        calls.append(
+            {
+                "system": system,
+                "user": user,
+                "schema": schema_,
+                "num_predict": num_predict,
+            }
+        )
+        if num_predict == 40:
+            return "", 0.01, "the model server went away"
+        return '{"subject": "feat(core): add a thing", "body": ""}', 0.5, None
+
+    real = runmod.call_ollama
+    runmod.call_ollama = fake_call
+    try:
+        content, latency, error, prompt_chars = runmod.generate_commit(
+            item, "model", Args(), schema, user_template
+        )
+    finally:
+        runmod.call_ollama = real
+
+    assert error is None, error
+    assert latency == 0.52, latency
+    expected_chars = (
+        len(runmod.MAP_SYSTEM)
+        + len(calls[0]["user"])
+        + len(runmod.MAP_SYSTEM)
+        + len(calls[1]["user"])
+        + len(item["system"])
+        + len(calls[2]["user"])
+    )
+    assert prompt_chars == expected_chars, (prompt_chars, expected_chars)
+    assert len(calls) == 3, calls  # two map calls, one reduce call
+    assert all(c["system"] == runmod.MAP_SYSTEM for c in calls[:2]), calls
+    assert all(c["schema"] is None and c["num_predict"] == 40 for c in calls[:2]), calls
+    assert calls[2]["system"] == item["system"], calls[2]
+    assert calls[2]["schema"] is schema and calls[2]["num_predict"] == 768, calls[2]
+    # The reduce prompt is the normal template, with the map lines as the diff.
+    assert "Files:\nsrc/a.go\nsrc/b.go" in calls[2]["user"], calls[2]["user"]
+    assert "changed src/a.go" in calls[2]["user"], calls[2]["user"]
+    assert "changed src/b.go" in calls[2]["user"], calls[2]["user"]
+    subject, body, parse_error = runmod.parse_model_json(content)
+    assert (subject, body, parse_error) == ("feat(core): add a thing", "", None)
+    assert "feat(core)" in subject, subject
+
+
+def test_chunking_slices_one_giant_hunk():
+    lines = "".join(f"+line {i:04d} of the giant hunk\n" for i in range(3000))
+    diff = (
+        "diff --git a/big.go b/big.go\n"
+        "--- a/big.go\n"
+        "+++ b/big.go\n"
+        f"@@ -1,0 +2,3000 @@ func Giant() {{\n{lines}"
+    )
+    case = {
+        "files": [{"path": "big.go", "add": "3000", "del": "0"}],
+        "diff": diff,
+    }
+    digest = build_digest(case)
+    budget = 5000  # tokens for one map call: forces the single hunk to be sliced
+    chunks = chunk_diff(digest["diff"], budget)
+    assert len(chunks) > 1, len(chunks)
+    for index, chunk in enumerate(chunks, 1):
+        prompt = build_map_user(chunk)
+        assert estimate_tokens(prompt) <= budget, (index, estimate_tokens(prompt))
+        assert chunk["paths"] == ["big.go"], chunk["paths"]
+        assert chunk["headers"], chunk
+
+
+def test_prepare_cases_selects_a_level_and_sends_the_digest():
+    """Every level is wired into the real prompt template, with no network."""
+    import run as runmod
+
+    style = {
+        "shape": "conventional",
+        "type_vocab": {"feat": 3, "fix": 2},
+        "scope_vocab": {"ui": 2},
+        "scope_rate": 0.9,
+        "subject_len": {"median": 40, "p90": 60},
+        "body_usage": 0.4,
+        "body_words": {"median": 40, "p90": 80},
+        "exemplars": ["feat(ui): add x"],
+        "n_subjects": 10,
+        "confidence": "high",
+        "match_rates": {"conventional": 1.0},
+    }
+    cases = [
+        {
+            "id": "a",
+            "repo": "fake",
+            "files": [{"path": "app.go", "add": "2", "del": "1"}],
+            "diff": UNIFIED3_SAMPLE,
+        },
+        {
+            **_large_case(blocks=1, lines_per_block=1500),
+            "id": "b",
+            "repo": "fake",
+        },
+        {
+            **_large_case(blocks=1, lines_per_block=5000),
+            "id": "c",
+            "repo": "fake",
+        },
+    ]
+    template = (Path(__file__).resolve().parent / "prompts" / "commit.md").read_text()
+    system_template, user_template = split_template(template)
+    args = type("Args", (), {"repo_root": "~/Dev", "num_ctx": 8192})()
+
+    real = runmod.load_style
+    runmod.load_style = lambda repo, root, cache: style
+    try:
+        prepared, leftovers = runmod.prepare_cases(
+            cases, args, strip_system_payload(system_template), user_template
+        )
+    finally:
+        runmod.load_style = real
+
+    assert [item["level"] for item in prepared] == ["A", "B", "C"], [
+        item["level"] for item in prepared
+    ]
+    assert leftovers == 0, leftovers
+    for item in prepared:
+        assert not item["error"], item["error"]
+        assert item["num_ctx"] <= MAX_NUM_CTX, item["num_ctx"]
+
+    a, b, c = prepared
+    assert a["user"].count("@@ -12 +12,2 @@") == 1, a["user"]
+    assert "\n \tctx10" not in a["user"], "a context line survived into the prompt"
+    assert a["digest_chars"] < a["diff_chars"], (a["digest_chars"], a["diff_chars"])
+    assert a["prompt_chars"] == len(a["system"]) + len(a["user"]), a["prompt_chars"]
+
+    assert b["num_ctx"] > 8192, b["num_ctx"]
+    assert b["level"] == "B" and b["chunks"] == 0, (b["level"], b["chunks"])
+
+    assert c["num_ctx"] == MAX_NUM_CTX, c["num_ctx"]
+    assert c["chunks"] > 1, c["chunks"]
+    assert len(c["chunk_plans"]) == c["chunks"], c["chunks"]
+    for index, chunk in enumerate(c["chunk_plans"], 1):
+        prompt = build_map_user(chunk)
+        budget = min(
+            context_budget(c["num_ctx"], c["system"]),
+            context_budget(c["num_ctx"], runmod.MAP_SYSTEM),
+        )
+        assert estimate_tokens(prompt) <= budget, (index, estimate_tokens(prompt))
 
 
 def test_render_prompt_leaves_unknown_token():
@@ -309,7 +714,6 @@ def test_schema_shape_is_complete():
     assert "pattern" not in schema["properties"]["body"]
 
 
-
 def test_scope_rate_is_mined():
     style = classify_subjects(
         [
@@ -411,7 +815,18 @@ def main():
         test_baseline_single_file,
         test_baseline_multi_file,
         test_baseline_truncates_long_path,
-        test_budget_oversized,
+        test_compression_drops_context_and_keeps_hunk_headers,
+        test_compression_splits_runs_and_renumbers_hunks,
+        test_level_a_digest_fits_and_has_no_context_lines,
+        test_budget_arithmetic,
+        test_level_b_raises_context_but_never_past_the_cap,
+        test_level_c_chunks_each_fit_and_the_count_is_right,
+        test_level_c_is_chosen_when_even_the_cap_cannot_hold_the_digest,
+        test_map_failure_yields_a_deterministic_line_and_level_c_terminates,
+        test_map_prompt_carries_paths_and_headers,
+        test_generate_commit_level_c_terminates_with_a_subject,
+        test_chunking_slices_one_giant_hunk,
+        test_prepare_cases_selects_a_level_and_sends_the_digest,
         test_render_prompt_leaves_unknown_token,
         test_render_prompt_reports_all_missing,
         test_split_template,
