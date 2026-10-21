@@ -1,9 +1,13 @@
-//! Staged diff digest: file list, numstat, filtered diff, and context budget.
+//! Staged diff digest: file list, diffstat and the context-free diff.
+//!
+//! `estimate_tokens` here is the coarse bytes-per-token estimate the release
+//! path uses to skip optional highlights. The commit path never refuses a diff;
+//! it plans a level instead (see `strategy`, which uses `chars / 3.5`).
 
 use crate::git::Repo;
 
-/// Rough local-model token estimate. Deliberately conservative for UTF-8:
-/// the point is to fail before sending, never to truncate.
+/// Rough local-model token estimate, deliberately conservative for UTF-8. Used
+/// only to decide whether an *optional* model call is worth making.
 pub const BYTES_PER_TOKEN: usize = 4;
 /// Room left for the model's answer and chat framing.
 pub const CONTEXT_MARGIN: usize = 256;
@@ -170,23 +174,6 @@ impl Digest {
 
 pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(BYTES_PER_TOKEN)
-}
-
-/// Fail-closed context check. Returns the estimate on success.
-pub fn enforce_budget(prompt: &str, num_ctx: usize, num_predict: usize) -> Result<usize, String> {
-    let budget = num_ctx
-        .saturating_sub(num_predict)
-        .saturating_sub(CONTEXT_MARGIN);
-    let estimated = estimate_tokens(prompt);
-    if estimated > budget {
-        return Err(format!(
-            "staged change is too large for the model: the prompt is ~{estimated} tokens, \
-             but the context budget is {budget} (num_ctx {num_ctx}, num_predict {num_predict}, \
-             margin {CONTEXT_MARGIN}). Narrow the stage with `git add -p`, or split this into \
-             smaller commits. Sloth never truncates or summarises a diff."
-        ));
-    }
-    Ok(estimated)
 }
 
 #[cfg(test)]

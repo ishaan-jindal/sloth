@@ -238,12 +238,17 @@ impl Repo {
     }
 
     /// Diff restricted to the given paths, for the filtered digest.
+    ///
+    /// `--unified=0`: the hunk header carries the enclosing function name,
+    /// which is the context a commit subject needs, and context lines would
+    /// triple the prompt for the same information (see `bench/DIFF_STRATEGY.md`).
     pub fn staged_diff_for_paths(&self, amend: bool, paths: &[String]) -> Result<String, String> {
         if paths.is_empty() {
             return Ok(String::new());
         }
         let mut args = self.staged_base(amend)?;
         args.push("--no-color".to_string());
+        args.push("--unified=0".to_string());
         args.push("--".to_string());
         for path in paths {
             args.push(format!(":(literal){path}"));

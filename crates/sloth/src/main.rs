@@ -1,10 +1,11 @@
 use clap::{Parser, Subcommand};
-use sloth::diff::{self, Digest};
+use sloth::diff::Digest;
 use sloth::git::Repo;
 use sloth::model::{self, Client};
 use sloth::msg::{self, Check, Conformance};
 use sloth::release::{self, Bump, TagScheme};
 use sloth::server;
+use sloth::strategy::{self, Level};
 use sloth::style::{self, Style};
 use sloth::ui;
 use std::fs;
@@ -12,7 +13,7 @@ use std::process::ExitCode;
 
 const ENV_HELP: &str = "\
 Environment:
-  SLOTH_MODEL         model name (default: qwen2.5-coder:1.5b)
+  SLOTH_MODEL         model name (default: qwen3:0.6b; reasoning is disabled)
   SLOTH_URL           Ollama base URL (default: http://127.0.0.1:11434)
   SLOTH_STYLE         force a commit shape: conventional, gitmoji, ticket, freeform
   SLOTH_ALLOW_REMOTE  set to 1 to permit a non-loopback endpoint (privacy opt-in)
@@ -52,6 +53,13 @@ enum Command {
         /// Print the release and the git commands, then change nothing
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Print the prompt, schema and mined style without calling a model
+    #[command(after_help = ENV_HELP)]
+    Prompt {
+        /// Emit one JSON object instead of labelled sections
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -109,10 +117,19 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let config = Config::load()?;
-    model::validate_endpoint(&config.url, config.allow_remote)?;
     match cli.command {
-        Command::Commit { amend, dry_run } => commit(&config, amend, dry_run),
-        Command::Release { version, dry_run } => release(&config, version, dry_run),
+        Command::Commit { amend, dry_run } => {
+            // Fail closed before anything can reach a model: a non-loopback
+            // endpoint still refuses unless SLOTH_ALLOW_REMOTE=1.
+            model::validate_endpoint(&config.url, config.allow_remote)?;
+            commit(&config, amend, dry_run)
+        }
+        Command::Release { version, dry_run } => {
+            model::validate_endpoint(&config.url, config.allow_remote)?;
+            release(&config, version, dry_run)
+        }
+        // No model is involved, so no endpoint is needed or contacted.
+        Command::Prompt { json } => prompt(&config, json),
     }
 }
 
@@ -195,18 +212,26 @@ fn fallback(mined: &Style, digest: &Digest) -> Suggestion {
 }
 
 /// Print what the model is doing, then the elapsed time when it returns.
-/// `label` is the whole action phrase, e.g. "asking qwen2.5-coder:1.5b".
+/// `label` is the whole action phrase, e.g. "asking qwen3:0.6b".
 fn ask_model(
     client: &Client,
     system: &str,
     user: &str,
     schema: &serde_json::Value,
     temperature: f64,
+    num_ctx: usize,
     label: &str,
 ) -> Result<String, String> {
     eprint!("sloth: {label}...");
     let started = std::time::Instant::now();
-    let result = client.chat(system, user, schema, temperature);
+    let result = client.chat_with(
+        system,
+        user,
+        Some(schema),
+        temperature,
+        num_ctx,
+        model::NUM_PREDICT,
+    );
     eprintln!(" done in {:.1}s", started.elapsed().as_secs_f64());
     result
 }
@@ -215,6 +240,7 @@ fn generate(
     client: &Client,
     schema: &serde_json::Value,
     prompt: &msg::Prompt,
+    num_ctx: usize,
     mined: &Style,
     digest: &Digest,
     nudge: Option<&str>,
@@ -230,6 +256,7 @@ fn generate(
         &user,
         schema,
         model::TEMPERATURE,
+        num_ctx,
         &format!("asking {}", client.model()),
     ) {
         Ok(content) => content,
@@ -260,6 +287,7 @@ fn generate(
                 &repair_user,
                 schema,
                 model::REPAIR_TEMPERATURE,
+                num_ctx,
                 "repairing the message",
             ) {
                 Ok(content) => match interpret(&content, mined, digest) {
@@ -286,6 +314,79 @@ fn generate(
             }
         }
     }
+}
+
+/// Level C map phase. It cannot fail the run: a piece whose call fails becomes
+/// a deterministic line built from its paths and hunk headers.
+fn summarise(client: &Client, chunks: &[strategy::Chunk], num_ctx: usize) -> Vec<String> {
+    let total = chunks.len();
+    eprintln!("sloth: summarising {total} piece(s) of the diff...");
+    let mut lines = Vec::with_capacity(total);
+    for (index, chunk) in chunks.iter().enumerate() {
+        let result = client.chat_with(
+            strategy::MAP_SYSTEM,
+            &chunk.map_user(),
+            None,
+            model::TEMPERATURE,
+            num_ctx,
+            strategy::MAP_LINE_TOKENS,
+        );
+        if let Err(error) = &result {
+            eprintln!(
+                "sloth: warning: piece {}/{total} could not be summarised: {error}",
+                index + 1
+            );
+        }
+        lines.push(strategy::map_line(chunk, result));
+    }
+    lines
+}
+
+/// `sloth prompt`: the exact material a model would receive, with no model.
+fn prompt(config: &Config, json: bool) -> Result<(), String> {
+    let repo = Repo::discover()?;
+    let digest = Digest::build(&repo, false)?;
+    let mut mined = style::mine(&repo, 300)?;
+    if let Some(shape) = &config.style {
+        mined.set_shape(shape)?;
+    }
+    let rendered = msg::build_prompt(&mined, &digest);
+    let schema = msg::schema_for(&mined);
+    let style = serde_json::to_value(&mined)
+        .map_err(|error| format!("cannot encode the mined style: {error}"))?;
+
+    if json {
+        let payload = serde_json::json!({
+            "system": rendered.system,
+            "user": rendered.user,
+            "schema": schema,
+            "style": style,
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|error| format!("cannot encode the prompt as JSON: {error}"))?
+        );
+        return Ok(());
+    }
+
+    println!("--- SYSTEM ---");
+    println!("{}", rendered.system);
+    println!("--- USER ---");
+    println!("{}", rendered.user);
+    println!("--- SCHEMA ---");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&schema)
+            .map_err(|error| format!("cannot encode the schema: {error}"))?
+    );
+    println!("--- STYLE ---");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&style)
+            .map_err(|error| format!("cannot encode the mined style: {error}"))?
+    );
+    Ok(())
 }
 
 fn commit(config: &Config, amend: bool, dry_run: bool) -> Result<(), String> {
@@ -322,15 +423,40 @@ fn commit(config: &Config, amend: bool, dry_run: bool) -> Result<(), String> {
     );
 
     let prompt = msg::build_prompt(&mined, &digest);
-    diff::enforce_budget(&prompt.full_text(), model::NUM_CTX, model::NUM_PREDICT)?;
+    let plan = strategy::plan(&prompt, &digest, model::NUM_CTX, strategy::MAX_NUM_CTX);
+    // Never let the user believe they read a full diff when they did not.
+    if let Some(note) = plan.report() {
+        eprintln!("sloth: {note}");
+    }
     if let Err(warning) = server::ensure_running(&config.url) {
         // Never block the commit on the model: the template fallback still works.
         eprintln!("sloth: warning: {warning}");
     }
     let client = Client::new(&config.url, &config.model);
+    // Level C writes the subject from the map lines plus the file list and
+    // diffstat, so the prompt is rebuilt over a digest whose "diff" is those
+    // lines. The answer is judged by the same checks either way.
+    let prompt = if plan.level == Level::C {
+        let lines = summarise(&client, &plan.chunks, plan.num_ctx);
+        let reduced = Digest {
+            files: digest.files.clone(),
+            diff: lines.join("\n"),
+        };
+        msg::build_prompt(&mined, &reduced)
+    } else {
+        prompt
+    };
     let schema = msg::schema_for(&mined);
     let mut nudge_index = 0usize;
-    let mut suggestion = generate(&client, &schema, &prompt, &mined, &digest, None);
+    let mut suggestion = generate(
+        &client,
+        &schema,
+        &prompt,
+        plan.num_ctx,
+        &mined,
+        &digest,
+        None,
+    );
 
     if dry_run {
         ui::print_proposal(
@@ -391,7 +517,15 @@ fn commit(config: &Config, amend: bool, dry_run: bool) -> Result<(), String> {
             ui::Action::Regenerate => {
                 let nudge = msg::NUDGES[nudge_index % msg::NUDGES.len()];
                 nudge_index += 1;
-                suggestion = generate(&client, &schema, &prompt, &mined, &digest, Some(nudge));
+                suggestion = generate(
+                    &client,
+                    &schema,
+                    &prompt,
+                    plan.num_ctx,
+                    &mined,
+                    &digest,
+                    Some(nudge),
+                );
             }
             ui::Action::Cancel => {
                 println!("cancelled; nothing was committed.");

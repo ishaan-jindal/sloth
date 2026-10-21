@@ -5,6 +5,7 @@
 //! miner supplies subjects and bodies.
 
 use crate::git::{Commit, Repo};
+use serde::Serialize;
 use std::collections::BTreeMap;
 
 pub const SHAPES: [&str; 4] = ["conventional", "gitmoji", "ticket", "freeform"];
@@ -51,13 +52,13 @@ pub struct BodyMetrics {
     pub p90_words: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct SubjectLen {
     pub median: usize,
     pub p90: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Style {
     pub shape: String,
     pub confidence: String,

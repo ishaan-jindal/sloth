@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-pub const DEFAULT_MODEL: &str = "qwen2.5-coder:1.5b";
+pub const DEFAULT_MODEL: &str = "qwen3:0.6b";
 pub const DEFAULT_URL: &str = "http://127.0.0.1:11434";
 
 /// Set explicitly: Ollama's default ctx is small enough to truncate silently.
@@ -16,11 +16,19 @@ pub const TEMPERATURE: f64 = 0.2;
 /// One repair call, slightly warmer than the first attempt.
 pub const REPAIR_TEMPERATURE: f64 = 0.4;
 
-/// `gemma4:e2b` enables thinking by default. Under a JSON-schema `format`
-/// constraint those tokens never reach `message.content`, leaving an empty
-/// response that is indistinguishable from a broken model. Ollama ignores
-/// this field for models that do not support it.
+/// Reasoning is off, structurally. Writing a commit subject needs none of it.
+///
+/// This was measured: a thinking-capable model (`gemma4:e2b` enables it by
+/// default) under a JSON-schema `format` constraint sends its tokens to the
+/// reasoning channel, so `message.content` arrives **empty** and the result is
+/// indistinguishable from a broken model. It cost a debugging session. Ollama
+/// ignores this field for models that do not support it.
 pub const THINK: bool = false;
+
+/// Appended to every "no content" error: the likely cause and the way out.
+pub const EMPTY_RESPONSE_HINT: &str = "A model whose thinking mode is on behind a server that \
+ignores `think: false` produces exactly this: its tokens go to the reasoning channel and never \
+to `message.content`. Use a non-thinking model, for example the default `qwen3:0.6b`.";
 
 pub struct Client {
     base_url: String,
@@ -74,24 +82,47 @@ impl Client {
         schema: &Value,
         temperature: f64,
     ) -> Result<String, String> {
-        let body = json!({
+        self.chat_with(
+            system,
+            user,
+            Some(schema),
+            temperature,
+            NUM_CTX,
+            NUM_PREDICT,
+        )
+    }
+
+    /// The same call with a per-call context window and output budget, and an
+    /// optional schema (the map phase asks for plain text, not JSON).
+    pub fn chat_with(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Option<&Value>,
+        temperature: f64,
+        num_ctx: usize,
+        num_predict: usize,
+    ) -> Result<String, String> {
+        let mut body = json!({
             "model": self.model,
             "stream": false,
-            "format": schema,
             "keep_alive": -1,
             "think": THINK,
             "options": {
                 "temperature": temperature,
                 "top_p": 0.9,
-                "num_ctx": NUM_CTX,
+                "num_ctx": num_ctx,
                 "seed": 42,
-                "num_predict": NUM_PREDICT,
+                "num_predict": num_predict,
             },
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         });
+        if let Some(schema) = schema {
+            body["format"] = schema.clone();
+        }
         let payload = serde_json::to_string(&body)
             .map_err(|err| format!("cannot encode the model request: {err}"))?;
         let endpoint = format!("{}/api/chat", self.base_url);
@@ -125,9 +156,14 @@ impl Client {
                 "Ollama returned no message (done_reason: {reason})"
             ));
         };
-        message
-            .content
-            .ok_or_else(|| format!("Ollama returned no message.content (done_reason: {reason})"))
+        match message.content {
+            Some(content) if !content.trim().is_empty() => Ok(content),
+            // Specific, because this failure is otherwise indistinguishable
+            // from a model that is simply broken.
+            _ => Err(format!(
+                "the model returned no content (done_reason: {reason}). {EMPTY_RESPONSE_HINT}"
+            )),
+        }
     }
 }
 
@@ -188,6 +224,45 @@ pub(crate) fn remote_refusal(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn the_default_model_is_the_smallest_and_reasoning_is_off() {
+        assert_eq!(DEFAULT_MODEL, "qwen3:0.6b");
+        const { assert!(!THINK) };
+    }
+
+    /// A canned HTTP reply, so the empty-content path is exercised without a model.
+    fn reply_once(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a fake server");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn empty_content_says_so_and_hints_at_thinking_mode() {
+        let url = reply_once(r#"{"message":{"content":"  "},"done_reason":"stop"}"#);
+        let client = Client::new(&url, DEFAULT_MODEL);
+        let error = client
+            .chat("system", "user", &json!({}), 0.2)
+            .expect_err("empty content is an error");
+        assert!(error.contains("the model returned no content"), "{error}");
+        assert!(error.contains("thinking mode"), "{error}");
+    }
 
     #[test]
     fn loopback_endpoints_are_accepted() {

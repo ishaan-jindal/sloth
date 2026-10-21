@@ -79,12 +79,6 @@ pub struct Prompt {
     pub user: String,
 }
 
-impl Prompt {
-    pub fn full_text(&self) -> String {
-        format!("{}\n--- USER ---\n{}", self.system, self.user)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Check {
     pub name: String,
@@ -816,7 +810,10 @@ pub fn add_nudge(user: &str, nudge: &str) -> String {
 
 pub fn parse_model_message(content: &str) -> Result<(String, String), String> {
     if content.trim().is_empty() {
-        return Err("model returned empty content".to_string());
+        return Err(format!(
+            "the model returned no content. {}",
+            crate::model::EMPTY_RESPONSE_HINT
+        ));
     }
     let parsed: ModelMessage = serde_json::from_str(content.trim())
         .map_err(|err| format!("model content is not valid JSON for the schema: {err}"))?;
