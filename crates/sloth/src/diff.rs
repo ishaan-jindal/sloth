@@ -40,6 +40,10 @@ pub struct Digest {
 }
 
 /// Why a path is excluded from the textual diff, if it is.
+///
+/// The one definition of the filter. The benchmark harness mirrors it in
+/// `bench/run.py::is_noise_path`; `bench/xcheck.py` feeds both implementations
+/// the same path corpus and fails if they disagree, so the two cannot drift.
 pub fn is_noise_path(path: &str) -> bool {
     let path = path.trim_end_matches('/');
     let base = path.rsplit('/').next().unwrap_or(path);

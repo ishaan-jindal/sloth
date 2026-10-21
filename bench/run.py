@@ -55,6 +55,29 @@ LEVELS = ("A", "B", "C")
 HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 FILE_HEADER_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
+# The tool's noise filter, from crates/sloth/src/diff.rs. There is one
+# definition per side and xcheck.py proves they make the same keep-or-drop
+# decision for every path in the corpus. Change one, change both.
+LOCKFILES = frozenset(
+    name.lower()
+    for name in (
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "Gemfile.lock",
+        "go.sum",
+        "bun.lockb",
+    )
+)
+GENERATED_DIRS = frozenset(("node_modules", "vendor", "dist", "build", "target"))
+MINIFIED_SUFFIXES = (".min.js", ".min.css", ".min.mjs", ".min.cjs")
+# Rust's `eq_ignore_ascii_case` folds ASCII only; `str.lower()` also folds a few
+# non-ASCII lookalikes (Kelvin sign to "k"), which would make the two filters
+# disagree on a hostile path. Mirror the Rust fold exactly.
+ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
 
 # --------------------------------------------------------------------------- #
 # Budget and templating (pure, importable, no network)
@@ -189,17 +212,78 @@ def compress_diff(diff):
     return "\n".join(out) + ("\n" if diff.endswith("\n") else "")
 
 
+def is_noise_path(path):
+    """True for a path whose diff the tool keeps away from the model.
+
+    Mirrors `sloth::diff::is_noise_path` case for case: lockfile names are
+    matched case-insensitively on the basename, generated directories are
+    matched per path component, minified and snapshot files by suffix.
+    `xcheck.py` compares the two implementations behaviourally.
+    """
+    path = str(path or "").rstrip("/")
+    base = path.rsplit("/", 1)[-1]
+    if base.translate(ASCII_FOLD) in LOCKFILES:
+        return True
+    if any(part in GENERATED_DIRS for part in path.split("/")):
+        return True
+    if base.endswith(MINIFIED_SUFFIXES):
+        return True
+    return base.endswith(".snap") or "__snapshots__" in path.split("/")
+
+
+def filter_diff(diff, binary_paths=frozenset()):
+    """Drop the whole per-file block of every path the tool filters out.
+
+    The stored case diff is a `--unified=3` patch already split into one block
+    per file, so a filtered file is removed by dropping its block. A block with
+    no parseable `diff --git` header is kept: an unknown path is not noise.
+
+    Binary files are dropped too, because the tool drops them: `Digest::build`
+    keeps a file in the diff body only when `!file.binary && !is_noise_path(..)`,
+    and it detects a binary as `added == "-" && deleted == "-"`. The model never
+    sees the `Binary files ... differ` line, so the harness must not send it.
+    """
+    if not diff:
+        return ""
+    kept = []
+    for block in split_diff_blocks(diff):
+        # The b-side path is what git's numstat reports, so that is the path the
+        # tool filters on; `_block_paths` returns exactly that one.
+        paths = _block_paths("\n".join(block))
+        if paths and (is_noise_path(paths[0]) or paths[0] in binary_paths):
+            continue
+        kept.append("\n".join(block))
+    if not kept:
+        return ""
+    return "\n".join(kept) + ("\n" if diff.endswith("\n") else "")
+
+
 def build_digest(case):
-    """Level A digest: the changed paths, a diffstat, and the zero-context diff."""
+    """Level A digest: the changed paths, a diffstat, and the zero-context diff.
+
+    The diff body is filtered the way the tool filters it, so no lockfile,
+    vendored, generated, minified, snapshot or binary block reaches the model.
+    The file list and the diffstat are *not* filtered, because the tool's are
+    not: `Digest::build` in crates/sloth/src/diff.rs stores every staged path in
+    `files` and only filters the diff body, and `render_files`/`render_diffstat`
+    print that full list. Verified against `sloth prompt --json`.
+    """
     case = case or {}
     files = case.get("files") or []
+    # git's numstat reports "-" for both counts on a binary file, which is how
+    # the tool recognises one.
+    binary_paths = frozenset(
+        str(f.get("path", ""))
+        for f in files
+        if f.get("add") == "-" and f.get("del") == "-"
+    )
     return {
         "files": "\n".join(str(f.get("path", "")) for f in files),
         "diffstat": "\n".join(
             f"{f.get('add', '0')}/{f.get('del', '0')}\t{str(f.get('path', ''))}"
             for f in files
         ),
-        "diff": compress_diff(case.get("diff") or ""),
+        "diff": compress_diff(filter_diff(case.get("diff") or "", binary_paths)),
     }
 
 

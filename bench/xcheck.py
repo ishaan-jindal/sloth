@@ -13,13 +13,17 @@ Compared:
   - the four generated prompt texts
   - the schema fields the model server's grammar enforces
   - the prompt template file, which must be byte-identical
+  - the noise filter: the keep-or-drop decision for every path in the corpus
+    plus the filter's own edge cases, taken from the real Rust function by
+    compiling a four-line probe against the crate. Behaviour, not a list of
+    strings, so a rewrite on either side does not break the check.
 
 Not compared: the rendered `system`/`user` halves. They embed the diff, and the
 two sides legitimately differ there: the Rust digest asks git for a `--unified=0`
-diff and filters lockfiles and generated files, while the harness sends the
-stored case diff and reconstructs that diff from a `--unified=3` patch. That
-difference is documented in DIFF_STRATEGY.md; the style-derived texts above do
-not depend on the diff, so they are compared directly.
+diff, while the harness sends the stored case diff and reconstructs that diff
+from a `--unified=3` patch. The noise filter each side applies to the diff body
+*is* compared now (see above); the file list and diffstat are unfiltered on both
+sides, as `Digest::build` keeps every staged path in `files`.
 
 python3 bench/xcheck.py
 """
@@ -29,6 +33,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -36,7 +41,7 @@ ROOT = BENCH.parent
 
 sys.path.insert(0, str(BENCH))
 
-from run import build_values  # noqa: E402 - needs the path above
+from run import build_values, is_noise_path  # noqa: E402 - needs the path above
 from schema import build_schema  # noqa: E402
 from style import mine_style  # noqa: E402
 
@@ -146,6 +151,165 @@ def text_problem(rust, python):
     return "".join(diff).rstrip()
 
 
+# The filter's own edges: every rule, both sides of it, and ordinary sources
+# that must stay. The corpus is real paths from real commits; these add the
+# paths it may not contain, and any duplicate is dropped by corpus_paths().
+NOISE_PROBES = [
+    "Cargo.lock",
+    "crates/sloth/Cargo.lock",
+    "package-lock.json",
+    "web/package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Gemfile.lock",
+    "go.sum",
+    "service/go.sum",
+    "bun.lockb",
+    "BUN.LOCKB",
+    "CARGO.LOCK",
+    # Non-ASCII lookalikes: Rust folds ASCII only, so these must stay in.
+    "Cargo.loc\u212a",
+    "go.\u017fum",
+    "go.mod",
+    "go.sum.bak",
+    "node_modules/left-pad/index.js",
+    "node_modules/",
+    "vendor/github.com/x/y.go",
+    "dist/app.js",
+    "build/output.js",
+    "crates/sloth/target/debug/sloth",
+    "assets/app.min.js",
+    "assets/app.min.css",
+    "assets/app.min.mjs",
+    "assets/app.min.cjs",
+    "src/__snapshots__/view.snap",
+    "tui/__snapshots__/view.snap",
+    "src/view.snap",
+    "Node_modules/left-pad/index.js",
+    "src/build/main.rs",
+    "targets/main.rs",
+    "src/main.rs",
+    "src/main.rs/",
+    "docs/release.md",
+    "README.md",
+    "build.rs",
+    "vendor.js",
+    "min.js",
+    "src/__snapshots__x/view.ts",
+]
+
+PROBE_SOURCE = """\
+use std::io::{self, BufRead};
+
+fn main() {
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let path = line.unwrap_or_default();
+        let decision = if sloth::diff::is_noise_path(&path) {
+            "drop"
+        } else {
+            "keep"
+        };
+        println!("{decision}");
+    }
+}
+"""
+
+
+def corpus_paths():
+    """Every path in bench/cases.jsonl, then the filter's own edge cases."""
+    paths = []
+    with open(BENCH / "cases.jsonl") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            case = json.loads(line)
+            for file in case.get("files") or []:
+                path = str(file.get("path", ""))
+                if path and path not in paths:
+                    paths.append(path)
+    for path in NOISE_PROBES:
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def rust_filter(binary, paths):
+    """The Rust filter's decision for each path, keyed by path. True = drop.
+
+    Compiles a four-line probe against the crate that ships, so the comparison
+    is between the two behaviours rather than between two lists of strings.
+    Reaches no network and starts no model.
+    """
+    rlib = binary.parent / "libsloth.rlib"
+    if not rlib.exists():
+        raise RuntimeError(f"{rlib} is missing; cargo build produced no library")
+    if any("\n" in path or "\r" in path for path in paths):
+        raise RuntimeError("a path contains a line break; the probe reads one per line")
+    with tempfile.TemporaryDirectory(prefix="sloth-xcheck-") as workdir:
+        source = Path(workdir) / "probe.rs"
+        source.write_text(PROBE_SOURCE)
+        probe = Path(workdir) / "probe"
+        proc = subprocess.run(
+            [
+                "rustc",
+                "--edition",
+                "2021",
+                "-L",
+                f"dependency={binary.parent / 'deps'}",
+                "--extern",
+                f"sloth={rlib}",
+                str(source),
+                "-o",
+                str(probe),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "cannot compile the filter probe: "
+                + (proc.stderr.strip()[-600:] or "?")
+            )
+        run = subprocess.run(
+            [str(probe)],
+            input="\n".join(paths) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    if run.returncode != 0:
+        raise RuntimeError("the filter probe failed: " + run.stderr.strip()[-600:])
+    decisions = run.stdout.splitlines()
+    if len(decisions) != len(paths):
+        raise RuntimeError(
+            f"filter probe answered {len(decisions)} of {len(paths)} paths"
+        )
+    return {
+        path: decision == "drop"
+        for path, decision in zip(paths, decisions)
+        if decision in ("keep", "drop")
+    }
+
+
+def filter_disagreements(paths, rust):
+    """Paths where the two filters disagree. `rust` maps path -> drop?."""
+    problems = []
+    for path in paths:
+        if path not in rust:
+            problems.append(f"filter: the Rust side gave no decision for {path!r}")
+            continue
+        py_drop = is_noise_path(path)
+        if rust[path] != py_drop:
+            problems.append(
+                f"filter: {path!r} rust={'drop' if rust[path] else 'keep'} "
+                f"python={'drop' if py_drop else 'keep'}"
+            )
+    return problems
+
+
 def template_problem():
     """The two copies of the prompt template must be one template, not two."""
     bench = (BENCH / "prompts" / "commit.md").read_bytes()
@@ -224,6 +388,22 @@ def main():
     if template:
         problems.append(template)
 
+    # The filter, behaviourally: same paths in, same keep-or-drop out.
+    paths = corpus_paths()
+    filter_compared = 0
+    try:
+        rust = rust_filter(binary, paths)
+        found = filter_disagreements(paths, rust)
+        filter_compared = len(paths)
+        dropped = sum(1 for path in paths if rust.get(path))
+        problems.extend(found)
+        print(
+            f"{'ok  ' if not found else 'FAIL'} filter: {filter_compared} paths, "
+            f"{dropped} dropped by both, {len(found)} disagreement(s)"
+        )
+    except (RuntimeError, OSError) as exc:
+        problems.append(f"filter: {exc}")
+
     repositories = 0
     checked = 0
     for name, path in REPOS.items():
@@ -247,6 +427,11 @@ def main():
         f"compared: {checked} fields ({len(MINER_FIELDS)} style, "
         f"{len(PROMPT_VARIABLES)} prompt texts, {len(SCHEMA_FIELDS)} schema) "
         "plus the prompt template"
+    )
+    print(
+        f"compared: the noise filter on {filter_compared} paths "
+        f"({len(NOISE_PROBES)} filter edge cases plus every path "
+        "in bench/cases.jsonl, deduplicated), behaviourally"
     )
     print(
         "not compared: the rendered system/user halves (they embed the diff; the "

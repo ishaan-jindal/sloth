@@ -12,6 +12,7 @@ from pathlib import Path
 
 from baseline import baseline_message
 from conformance import check_message
+from rate import RECEIVED, deterministic_fidelity
 from run import (
     MAX_NUM_CTX,
     build_convention,
@@ -24,6 +25,8 @@ from run import (
     context_budget,
     estimate_tokens,
     fallback_line,
+    filter_diff,
+    is_noise_path,
     map_phase,
     render_prompt,
     split_diff_blocks,
@@ -32,6 +35,7 @@ from run import (
 )
 from schema import build_schema, subject_pattern
 from style import classify_subjects
+from xcheck import corpus_paths, filter_disagreements
 
 CONVENTIONAL_SUBJECTS = [
     "feat(ui): add thing",
@@ -848,6 +852,193 @@ def test_convention_states_the_prefix_even_with_no_mined_types():
     assert "Types in use, by frequency" in text, text
 
 
+# --------------------------------------------------------------------------- #
+# The noise filter. The tool removes lockfiles, vendored/generated paths,
+# minified and snapshot files from the diff the model sees; the harness must
+# remove the same set, or the benchmark scores a prompt the tool never sends.
+# --------------------------------------------------------------------------- #
+UNIFIED3_WITH_NOISE = (
+    "diff --git a/go.sum b/go.sum\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/go.sum\n"
+    "+++ b/go.sum\n"
+    "@@ -1,2 +1,3 @@\n"
+    " github.com/old/dep v1.0.0 h1:aaa=\n"
+    "+github.com/zzz/noise_only v0.9.9 h1:bbb=\n"
+    " github.com/old/other v1.0.0 h1:ccc=\n"
+    "diff --git a/src/app.go b/src/app.go\n"
+    "index 3333333..4444444 100644\n"
+    "--- a/src/app.go\n"
+    "+++ b/src/app.go\n"
+    "@@ -10,1 +10,2 @@ func Run() {\n"
+    " context line\n"
+    "+func ParseWidget() {}\n"
+)
+
+GO_SUM_AND_APP_CASE = {
+    "files": [
+        {"path": "go.sum", "add": "1", "del": "0"},
+        {"path": "src/app.go", "add": "1", "del": "0"},
+    ],
+    "diff": UNIFIED3_WITH_NOISE,
+    "subject": "fix(deps): pin the transitive dependency",
+}
+
+
+def test_noise_filter_covers_every_class_the_tool_filters():
+    for path in [
+        "Cargo.lock",
+        "web/package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "Gemfile.lock",
+        "go.sum",
+        "service/go.sum",
+        "bun.lockb",
+        "CARGO.LOCK",  # the tool matches lockfile names case-insensitively
+        "node_modules/left-pad/index.js",
+        "vendor/github.com/x/y.go",
+        "dist/app.js",
+        "build/output.js",
+        "crates/sloth/target/debug/sloth",
+        "assets/app.min.js",
+        "assets/app.min.css",
+        "assets/app.min.mjs",
+        "assets/app.min.cjs",
+        "src/view.snap",
+        "src/__snapshots__/view.snap",
+    ]:
+        assert is_noise_path(path), path
+    for path in [
+        "src/main.rs",
+        "docs/release.md",
+        "go.mod",
+        "go.sum.bak",
+        "build.rs",
+        "targets/main.rs",
+        "Node_modules/left-pad/index.js",  # components are case-sensitive
+        "Cargo.loc\u212a",  # Rust folds ASCII only; Kelvin sign is not "K"
+        "",
+    ]:
+        assert not is_noise_path(path), path
+
+
+def test_filtered_file_is_absent_from_the_diff_body():
+    digest = build_digest(GO_SUM_AND_APP_CASE)
+    assert "diff --git a/go.sum" not in digest["diff"], digest["diff"]
+    assert "noise_only" not in digest["diff"], digest["diff"]
+    assert "diff --git a/src/app.go" in digest["diff"], digest["diff"]
+    assert "+func ParseWidget() {}" in digest["diff"], digest["diff"]
+    assert filter_diff(UNIFIED3_WITH_NOISE).count("diff --git") == 1
+    # Ordinary sources pass through untouched.
+    plain = (
+        "diff --git a/src/main.rs b/src/main.rs\n"
+        "--- a/src/main.rs\n"
+        "+++ b/src/main.rs\n"
+        "@@ -1 +1 @@\n"
+        "-a\n"
+        "+b\n"
+    )
+    assert filter_diff(plain) == plain, filter_diff(plain)
+
+    # The file list and the diffstat stay UNFILTERED, because the tool's do:
+    # `Digest::build` keeps every staged path in `files` and filters only the
+    # diff body. `sloth prompt --json` on a stage with go.sum in it prints
+    # go.sum in both lists and omits its diff block. Matching that is the point.
+    assert "go.sum" in digest["files"].splitlines(), digest["files"]
+    assert "1/0\tgo.sum" in digest["diffstat"].splitlines(), digest["diffstat"]
+
+
+def test_fidelity_judges_against_the_filtered_digest_not_the_full_case_diff():
+    subject = "fix(deps): pin noise_only to v0.9.9"
+    # Control: against the full case diff the term is supported, which is why
+    # the old check credited a claim the model could not have made.
+    unfiltered = {
+        "files": "go.sum\nsrc/app.go",
+        "diffstat": "1/0\tgo.sum\n1/0\tsrc/app.go",
+        "diff": compress_diff(GO_SUM_AND_APP_CASE["diff"]),
+    }
+    assert "noise_only" in unfiltered["diff"]
+    assert deterministic_fidelity(
+        subject, None, GO_SUM_AND_APP_CASE, {}, unfiltered
+    ) == (
+        [],
+        [],
+    )
+
+    # The filtered digest is what the model received; the same subject is now
+    # an unsupported claim. Both the explicit digest and the default one agree.
+    digest = build_digest(GO_SUM_AND_APP_CASE)
+    for candidate in (digest, None):
+        claims, notes = deterministic_fidelity(
+            subject, None, GO_SUM_AND_APP_CASE, {}, candidate
+        )
+        assert notes == [], notes
+        assert any("noise_only" in claim for claim in claims), claims
+
+    # A claim about a symbol the model *was* shown is still supported.
+    claims, _ = deterministic_fidelity(
+        "feat(app): add ParseWidget helper", None, GO_SUM_AND_APP_CASE, {}
+    )
+    assert claims == [], claims
+    assert "filtered" in RECEIVED and "FILES" in RECEIVED, RECEIVED
+
+
+def test_filter_comparison_passes_on_agreement_and_fails_on_drift():
+    paths = ["go.sum", "src/main.rs", "node_modules/x/y.js", "a.min.css"]
+    agreeing = {path: is_noise_path(path) for path in paths}
+    assert filter_disagreements(paths, agreeing) == []
+
+    drifted = dict(agreeing)
+    drifted["go.sum"] = False  # one side keeps a lockfile the other drops
+    found = filter_disagreements(paths, drifted)
+    assert len(found) == 1 and "go.sum" in found[0], found
+
+    # A path with no Rust decision is a failure, not a pass by omission.
+    assert filter_disagreements(paths, {"go.sum": True}), "missing decisions must fail"
+
+    # The probe reads one path per line, so a corpus path must not break that.
+    corpus = corpus_paths()
+    assert corpus, "cases.jsonl produced no paths"
+    assert all("\n" not in path and "\r" not in path for path in corpus), (
+        "a corpus path has a line break"
+    )
+
+
+def test_binary_files_are_dropped_from_the_digest():
+    """The tool excludes binary files from the diff body, so the harness must
+    too: the model never sees the `Binary files ... differ` line, and the
+    fidelity axis must not credit a claim drawn from it.
+
+    git's numstat reports "-" for both counts on a binary file, which is how
+    the tool recognises one.
+    """
+    case = {
+        "files": [
+            {"path": "src/lib.rs", "add": "3", "del": "1"},
+            {"path": "public/assets/demo.gif", "add": "-", "del": "-"},
+        ],
+        "diff": (
+            "diff --git a/src/lib.rs b/src/lib.rs\n"
+            "--- a/src/lib.rs\n"
+            "+++ b/src/lib.rs\n"
+            "@@ -1,3 +1,3 @@\n"
+            "-old\n"
+            "+new\n"
+            "diff --git a/public/assets/demo.gif b/public/assets/demo.gif\n"
+            "index 872..ca6 100644\n"
+            "Binary files a/public/assets/demo.gif and b/public/assets/demo.gif differ\n"
+        ),
+    }
+    digest = build_digest(case)
+    assert "demo.gif" not in digest["diff"], digest["diff"]
+    assert "Binary files" not in digest["diff"], digest["diff"]
+    assert "src/lib.rs" in digest["diff"], digest["diff"]
+    # the file list and the diffstat keep every path, as the tool's do
+    assert "public/assets/demo.gif" in digest["files"], digest["files"]
+
+
 def main():
     tests = [
         test_style_conventional,
@@ -891,6 +1082,11 @@ def main():
         test_schema_subject_length_matches_the_conformance_bound,
         test_prompt_templates_are_byte_identical,
         test_convention_states_the_prefix_even_with_no_mined_types,
+        test_binary_files_are_dropped_from_the_digest,
+        test_noise_filter_covers_every_class_the_tool_filters,
+        test_filtered_file_is_absent_from_the_diff_body,
+        test_fidelity_judges_against_the_filtered_digest_not_the_full_case_diff,
+        test_filter_comparison_passes_on_agreement_and_fails_on_drift,
     ]
     for test in tests:
         test()

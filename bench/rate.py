@@ -7,13 +7,18 @@ Three artefacts:
   3. `rating_sheet.md` - the same tasks laid out for a human rater
 
 Plus deterministic fidelity checks (axis B proxy) computed here, with no LLM:
-a subject that names a file, symbol, scope or issue number that the diff does not
-support is an unsupported claim. These are the two failure modes the pilot actually
-produced, and they are checkable without a model.
+a subject that names a file, symbol, scope or issue number that the *filtered
+digest the model received* does not support is an unsupported claim. The tool
+removes lockfiles, vendored/generated paths, minified and snapshot files before
+the model sees them, so the check runs against that filtered digest, not the
+full case diff. These are the two failure modes the pilot actually produced, and
+they are checkable without a model.
 """
 
 import argparse, json, re, sys
 from pathlib import Path
+
+from run import build_digest
 
 BENCH = Path(__file__).resolve().parent
 ISSUE = re.compile(r"\(#\d+\)|#\d+")
@@ -182,20 +187,43 @@ def diff_tokens(diff):
     return {w.lower() for w in WORD.findall(diff)}
 
 
-def deterministic_fidelity(subject, scope, case, style):
+RECEIVED = "filtered digest (FILES + DIFFSTAT + filtered DIFF)"
+
+
+def received_text(digest):
+    """The change material the model was shown, in the prompt's own order.
+
+    The file list and diffstat are the tool's full ones; the diff body is the
+    filtered one. That is the only text a subject can be supported by.
+    """
+    return "\n".join(
+        part
+        for part in (digest.get("files"), digest.get("diffstat"), digest.get("diff"))
+        if part
+    )
+
+
+def deterministic_fidelity(subject, scope, case, style, digest=None):
     """Return (unsupported_claims, notes). No model involved.
+
+    The comparison text is the *filtered digest the model received*
+    (``received_text``), never the full case diff. The tool removes lockfiles,
+    vendored and generated paths, minified and snapshot files before the model
+    sees them; a subject that names a term living only in one of those blocks
+    was not making a claim the model could support, and a claim about a file
+    the tool kept must not be judged against a text the tool altered.
 
     Only claims that can be checked without judgement:
       - an issue or pull-request number (never knowable from a local diff)
       - a file name named in the subject (the prompt forbids it)
-      - a code identifier that does not occur anywhere in the diff
+      - a code identifier that does not occur anywhere in what was shown
     An unseen scope is a note, not a claim: a new subsystem can legitimately need
     a scope the repository has never used.
     """
     claims, notes = [], []
-    d = case["diff"]
-    dlow = d.lower()
-    files = {f["path"] for f in case["files"]}
+    digest = digest if digest is not None else build_digest(case)
+    seen = received_text(digest).lower()
+    files = [line for line in (digest.get("files") or "").splitlines() if line]
     bases = {Path(f).name.lower() for f in files} | {
         Path(f).stem.lower() for f in files
     }
@@ -207,13 +235,13 @@ def deterministic_fidelity(subject, scope, case, style):
         low = m.lower()
         if low in bases or any(low in b for b in bases):
             continue
-        if low in dlow:
+        if low in seen:
             continue
         claims.append(f"file name {m!r} is not part of the change")
 
     for m in CODE_TOKEN.findall(subject):
         low = m.lower()
-        if low in dlow:
+        if low in seen:
             continue
         if any(low in b for b in bases):
             continue
@@ -392,7 +420,10 @@ def main():
             m = re.match(r"^[a-z]+\(([^)]+)\):", r.get("subject", ""))
             if m:
                 scope = m.group(1)
-            claims, notes = deterministic_fidelity(r.get("subject", ""), scope, c, st)
+            digest = build_digest(c)
+            claims, notes = deterministic_fidelity(
+                r.get("subject", ""), scope, c, st, digest
+            )
             body_status, body_notes = body_convention(
                 r.get("body", ""), r.get("subject", ""), st
             )
@@ -407,6 +438,11 @@ def main():
                         "unsupported_claims": claims,
                         "notes": notes,
                         "clean": not claims,
+                        # Which text the claim check ran against. A reader of
+                        # the report needs this to know that no claim is judged
+                        # against a block the tool never showed the model.
+                        "compared_against": RECEIVED,
+                        "digest_chars": len(digest["diff"]),
                         "body_status": body_status,
                         "body_notes": body_notes,
                     }
@@ -445,6 +481,7 @@ def main():
             f.write("\n```\n\n</details>\n\n")
 
     print(f"fidelity rows -> {a.out_fidelity}")
+    print(f"  claim check ran against the {RECEIVED}, not the full case diff")
     print(f"human sheet -> {BENCH / 'rating_sheet.md'}")
 
 
