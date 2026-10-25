@@ -19,17 +19,19 @@ offline once the model is on disk.
 cargo install --path crates/sloth
 ```
 
-You need a local model. [Ollama](https://ollama.com) is the easy path; any
-OpenAI-compatible local server works.
+You need a local model file. Point Sloth at a GGUF on disk, or name a model you
+have already pulled — Sloth reads Ollama's local store directly, no server needed.
 
 ```sh
-ollama pull qwen3:0.6b
+sloth --model qwen3:0.6b
 ```
 
-You do **not** have to start the server yourself. Sloth starts it if it is not
-already running, tells you it is doing so, and leaves it running afterwards. If it
-cannot start one, it says so and falls back to a deterministic message rather than
-blocking your commit.
+There is no server, no port, and no network connection. The model runs inside
+the Sloth process. If Sloth cannot find the model, it says so and stops rather
+than guessing: pass a path to a `.gguf` file, or an Ollama model name such as
+`qwen3:0.6b`. A model file that exists but fails to load falls back to a
+deterministic message instead — Sloth never blocks your commit on a broken file,
+only on a missing one.
 
 ## Use
 
@@ -60,23 +62,21 @@ Sloth **never pushes**. It prints the command for you to run.
 
 ## Configuration
 
-No config file. Four environment variables:
+No config file. Three environment variables, one flag:
 
-| variable | default | meaning |
+| variable / flag | default | meaning |
 |---|---|---|
-| `SLOTH_MODEL` | `qwen3:0.6b` | which model to talk to |
-| `SLOTH_URL` | `http://127.0.0.1:11434` | the local model server |
+| `SLOTH_MODEL` / `--model` | `qwen3:0.6b` | a path to a `.gguf` file, or an Ollama model name |
 | `SLOTH_STYLE` | *(mined)* | force a shape: `conventional`, `gitmoji`, `ticket`, `freeform` |
-| `SLOTH_ALLOW_REMOTE` | unset | set to `1` to permit a non-loopback endpoint |
 
-`SLOTH_ALLOW_REMOTE` exists because the privacy guarantee is only true for a local
-endpoint. By default Sloth **refuses to run** against anything that is not
-loopback, rather than quietly sending your diff to a remote service.
+The privacy guarantee is structural: there is no HTTP client in the binary and
+no endpoint to misconfigure, so your diff cannot leave the machine. The model
+file is memory-mapped, not uploaded anywhere.
 
 The default model is small on purpose. Writing a commit message needs no reasoning,
-so reasoning is switched off explicitly: a model with thinking enabled and a
-JSON-schema constraint returns an *empty* response that looks exactly like a broken
-model. If you see `the model returned no content`, that is the first thing to check.
+so there is nothing to switch off: the embedded engine runs no thinking pass.
+If you see `the model returned no content`, the model file itself is the first
+thing to check.
 
 ## How it works
 
@@ -94,19 +94,15 @@ model. If you see `the model returned no content`, that is the first thing to ch
    up to 32k) and if that is still not enough, it summarises the diff in pieces and
    combines the summaries. Either way you get a message, and Sloth tells you which
    it did: `diff was 61,000 lines; summarised in 14 pieces, then combined`.
-4. **Constrain the shape.** The JSON schema sent to the model carries a `pattern`
-   for the subject and a `maxLength` for both fields, generated from the mined
-   convention. The model server compiles the schema into a grammar and masks
-   every token that cannot continue a valid value, so a subject that breaks the
-   repository's convention is *unreachable* rather than merely invalid, and a
-   body the repository does not use is not something the model can write at all.
-   The model chooses the words; the shape is not a matter of opinion. Bounding
-   the body also stops a small model from running away in a repetition loop —
-   on this laptop the same prompt took 25 s unbounded and 2 s bounded.
-5. **Generate, then validate.** The model's output is checked against the
-   repository's convention. If it fails, one repair call is made with the specific
-   failures appended. If that fails too, a deterministic template is offered
-   instead — Sloth never blocks your commit.
+4. **Constrain the shape, then check it.** The JSON schema sent to the model carries a
+   `pattern` for the subject and a `maxLength` for both fields, generated from the mined
+   convention. The grammar compiler turns the schema into a hard constraint on what the
+   model can emit — but a grammar is a nudge, not a proof: escaped characters can slip
+   past it, and an unsupported pattern degrades to a free string. So the model's output
+   is parsed and re-checked in code (full regex on the unescaped value, same length
+   bound) before anything else happens. If that check fails, one repair call is made
+   with the specific failures appended. If that fails too, a deterministic template is
+   offered instead — Sloth never blocks your commit on a bad generation.
 6. **Clean up what cannot be known.** A local tool cannot know a pull-request
    number, so any `(#1234)` the model invents is removed. A scope the repository
    has never used is flagged for you rather than rewritten, and so is a subject
@@ -146,10 +142,9 @@ crates/sloth/     the CLI
     style.rs      mining the repository's convention
     diff.rs       the staged-diff digest and the noise filter
     strategy.rs   choosing a level for a diff that will not fit in one context
-    model.rs      the local model client
+    model.rs      the embedded model: resolution, grammar, generation
     msg.rs        message assembly, the JSON schema, and conformance checks
     release.rs    version bump, tag scheme, changelog
-    server.rs     starting the local model server if it is not running
     ui.rs         the inline confirm, edit and regenerate flow
 bench/            the benchmark, its protocol, its corpus and its results
 ```
@@ -167,9 +162,18 @@ handling changed underneath it afterwards, so those rows were discarded rather t
 reported. Re-running the benchmark is the next step, and it is deliberately the
 last thing before this is finished rather than the first.
 
-Two things are still open: whether the model should be embedded (llama.cpp) rather
-than reached over HTTP, and whether the benchmark should drive this binary directly
-instead of reimplementing it in Python.
+Two things are still open: whether the benchmark should drive this binary directly
+instead of reimplementing it in Python, and the benchmark run itself, which is
+deliberately the last thing before this is finished rather than the first.
+
+Known issues with the embedded backend, recorded rather than fixed:
+- Grammar-constrained generation runs ~35% slower than the same file through
+  Ollama with a schema (15–17 vs 25.6 tok/s); the user-visible cost is ~1.6 s
+  per one-shot commit. Threading differs between the two measurements, so the
+  cause is not isolated.
+- `commit` hard-errors on a model that resolves to nothing, while `release`
+  warns and proceeds (highlights are decoration; the message is the product).
+  That asymmetry is intended — do not "fix" it without deciding which side moves.
 
 
 ## License

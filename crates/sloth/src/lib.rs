@@ -3,7 +3,6 @@ pub mod git;
 pub mod model;
 pub mod msg;
 pub mod release;
-pub mod server;
 pub mod strategy;
 pub mod style;
 pub mod ui;

@@ -157,14 +157,13 @@ fn prompt_json_emits_every_half_without_a_model() {
     fs::write(dir.join("api.rs"), "pub fn one() {}\npub fn two() {}\n").expect("write file");
     git(&dir, &["add", "api.rs"]);
 
-    // A non-loopback URL would be refused the moment anything validated or
-    // contacted an endpoint; `prompt` does neither.
+    // `prompt` resolves and loads no model at all: a bogus SLOTH_MODEL must not
+    // matter, which is what keeps this command usable on a machine with no GGUF.
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_sloth"))
             .args(args)
             .current_dir(&dir)
-            .env("SLOTH_URL", "http://192.0.2.1:11434")
-            .env_remove("SLOTH_ALLOW_REMOTE")
+            .env("SLOTH_MODEL", "/nonexistent/sloth-test-model.gguf")
             .output()
             .expect("run the sloth binary")
     };

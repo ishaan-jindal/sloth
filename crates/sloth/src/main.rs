@@ -4,30 +4,34 @@ use sloth::git::Repo;
 use sloth::model::{self, Client};
 use sloth::msg::{self, Check, Conformance};
 use sloth::release::{self, Bump, TagScheme};
-use sloth::server;
 use sloth::strategy::{self, Level};
 use sloth::style::{self, Style};
 use sloth::ui;
 use std::fs;
+use std::path::Path;
 use std::process::ExitCode;
 
 const ENV_HELP: &str = "\
 Environment:
-  SLOTH_MODEL         model name (default: qwen3:0.6b; reasoning is disabled)
-  SLOTH_URL           Ollama base URL (default: http://127.0.0.1:11434)
-  SLOTH_STYLE         force a commit shape: conventional, gitmoji, ticket, freeform
-  SLOTH_ALLOW_REMOTE  set to 1 to permit a non-loopback endpoint (privacy opt-in)
+  SLOTH_MODEL  a GGUF file path or an Ollama model name (default: qwen3:0.6b)
+  SLOTH_STYLE  force a commit shape: conventional, gitmoji, ticket, freeform
 
+The model runs inside this process from a local GGUF file. No server is
+contacted; an Ollama name is only a way to find that file in the local store
+(~/.ollama/models, or $OLLAMA_MODELS when set).
 Sloth never pushes. It prints the push command for you to run.";
 
 #[derive(Parser)]
 #[command(
     name = "sloth",
     version,
-    about = "Local-only commit messages and release changelogs",
+    about = "Local commit messages and release changelogs, in-process",
     after_help = ENV_HELP
 )]
 struct Cli {
+    /// GGUF file path or Ollama model name; overrides SLOTH_MODEL
+    #[arg(long, global = true, value_name = "MODEL")]
+    model: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -65,23 +69,16 @@ enum Command {
 
 struct Config {
     model: String,
-    url: String,
     style: Option<String>,
-    allow_remote: bool,
 }
 
 impl Config {
-    fn load() -> Result<Self, String> {
-        let model = std::env::var("SLOTH_MODEL")
-            .ok()
+    fn load(model_flag: Option<String>) -> Result<Self, String> {
+        let model = model_flag
+            .or_else(|| std::env::var("SLOTH_MODEL").ok())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| model::DEFAULT_MODEL.to_string());
-        let url = std::env::var("SLOTH_URL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| model::DEFAULT_URL.to_string());
         let style = std::env::var("SLOTH_STYLE")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
@@ -94,13 +91,7 @@ impl Config {
                 ));
             }
         }
-        let allow_remote = std::env::var("SLOTH_ALLOW_REMOTE").as_deref() == Ok("1");
-        Ok(Self {
-            model,
-            url,
-            style,
-            allow_remote,
-        })
+        Ok(Self { model, style })
     }
 }
 
@@ -116,19 +107,11 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    let config = Config::load()?;
+    let config = Config::load(cli.model.clone())?;
     match cli.command {
-        Command::Commit { amend, dry_run } => {
-            // Fail closed before anything can reach a model: a non-loopback
-            // endpoint still refuses unless SLOTH_ALLOW_REMOTE=1.
-            model::validate_endpoint(&config.url, config.allow_remote)?;
-            commit(&config, amend, dry_run)
-        }
-        Command::Release { version, dry_run } => {
-            model::validate_endpoint(&config.url, config.allow_remote)?;
-            release(&config, version, dry_run)
-        }
-        // No model is involved, so no endpoint is needed or contacted.
+        Command::Commit { amend, dry_run } => commit(&config, amend, dry_run),
+        Command::Release { version, dry_run } => release(&config, version, dry_run),
+        // No model is resolved or loaded, so `prompt` works with none present.
         Command::Prompt { json } => prompt(&config, json),
     }
 }
@@ -175,10 +158,37 @@ struct Attempt {
     body_note: Option<String>,
 }
 
+/// Resolve and load the model. Resolution failures are fatal (the message
+/// names both ways to provide a model); a file that exists but cannot be loaded
+/// is a warning, because the template fallback still writes a message.
+fn resolve_client(spec: &str) -> Result<Option<Client>, String> {
+    let path = model::resolve_model(spec)?;
+    Ok(load_client(&path, spec))
+}
+
+fn load_client(path: &Path, name: &str) -> Option<Client> {
+    match Client::load_file(path, name) {
+        Ok(client) => Some(client),
+        Err(error) => {
+            eprintln!("sloth: warning: {error}");
+            None
+        }
+    }
+}
+
 fn interpret(content: &str, mined: &Style, digest: &Digest) -> Result<Attempt, AttemptError> {
     let (raw_subject, raw_body) = msg::parse_model_message(content).map_err(AttemptError::Parse)?;
     let (subject, subject_refs) = msg::strip_fabricated_refs(&raw_subject);
     let (body, body_refs) = msg::strip_fabricated_refs(&raw_body);
+    // The grammar matched raw JSON text; this is the check on the decoded
+    // values. A failure is invalid output, not a formatting nit.
+    if let Some(failure) = msg::post_parse_failure(mined, &subject, &body) {
+        let failures = [&failure];
+        return Err(AttemptError::Rejected {
+            repair: msg::repair_instruction(&failures),
+            summary: format!("{}: {}", failure.name, failure.detail),
+        });
+    }
     let (body, body_note) = msg::prepare_body(mined, &subject, &body);
     let conformance: Conformance = msg::check_message(mined, &subject, &body);
     let failures: Vec<&Check> = conformance.blocking_failures();
@@ -237,7 +247,7 @@ fn ask_model(
 }
 
 fn generate(
-    client: &Client,
+    client: Option<&Client>,
     schema: &serde_json::Value,
     prompt: &msg::Prompt,
     num_ctx: usize,
@@ -245,6 +255,9 @@ fn generate(
     digest: &Digest,
     nudge: Option<&str>,
 ) -> Suggestion {
+    let Some(client) = client else {
+        return fallback(mined, digest);
+    };
     let mut user = prompt.user.clone();
     if let Some(nudge) = nudge {
         user = msg::add_nudge(&user, nudge);
@@ -318,19 +331,22 @@ fn generate(
 
 /// Level C map phase. It cannot fail the run: a piece whose call fails becomes
 /// a deterministic line built from its paths and hunk headers.
-fn summarise(client: &Client, chunks: &[strategy::Chunk], num_ctx: usize) -> Vec<String> {
+fn summarise(client: Option<&Client>, chunks: &[strategy::Chunk], num_ctx: usize) -> Vec<String> {
     let total = chunks.len();
     eprintln!("sloth: summarising {total} piece(s) of the diff...");
     let mut lines = Vec::with_capacity(total);
     for (index, chunk) in chunks.iter().enumerate() {
-        let result = client.chat_with(
-            strategy::MAP_SYSTEM,
-            &chunk.map_user(),
-            None,
-            model::TEMPERATURE,
-            num_ctx,
-            strategy::MAP_LINE_TOKENS,
-        );
+        let result = match client {
+            Some(client) => client.chat_with(
+                strategy::MAP_SYSTEM,
+                &chunk.map_user(),
+                None,
+                model::TEMPERATURE,
+                num_ctx,
+                strategy::MAP_LINE_TOKENS,
+            ),
+            None => Err("the model is unavailable".to_string()),
+        };
         if let Err(error) = &result {
             eprintln!(
                 "sloth: warning: piece {}/{total} could not be summarised: {error}",
@@ -429,16 +445,12 @@ fn commit(config: &Config, amend: bool, dry_run: bool) -> Result<(), String> {
     if let Some(note) = plan.report() {
         eprintln!("sloth: {note}");
     }
-    if let Err(warning) = server::ensure_running(&config.url) {
-        // Never block the commit on the model: the template fallback still works.
-        eprintln!("sloth: warning: {warning}");
-    }
-    let client = Client::new(&config.url, &config.model);
+    let client = resolve_client(&config.model)?;
     // Level C writes the subject from the map lines plus the file list and
     // diffstat, so the prompt is rebuilt over a digest whose "diff" is those
     // lines. The answer is judged by the same checks either way.
     let prompt = if plan.level == Level::C {
-        let lines = summarise(&client, &plan.chunks, plan.num_ctx);
+        let lines = summarise(client.as_ref(), &plan.chunks, plan.num_ctx);
         let reduced = Digest {
             files: digest.files.clone(),
             diff: lines.join("\n"),
@@ -450,7 +462,7 @@ fn commit(config: &Config, amend: bool, dry_run: bool) -> Result<(), String> {
     let schema = msg::schema_for(&mined);
     let mut nudge_index = 0usize;
     let mut suggestion = generate(
-        &client,
+        client.as_ref(),
         &schema,
         &prompt,
         plan.num_ctx,
@@ -519,7 +531,7 @@ fn commit(config: &Config, amend: bool, dry_run: bool) -> Result<(), String> {
                 let nudge = msg::NUDGES[nudge_index % msg::NUDGES.len()];
                 nudge_index += 1;
                 suggestion = generate(
-                    &client,
+                    client.as_ref(),
                     &schema,
                     &prompt,
                     plan.num_ctx,
@@ -616,20 +628,26 @@ fn release(config: &Config, explicit_version: Option<String>, dry_run: bool) -> 
     let date = release::today_utc();
     let groups = release::group_commits(&commits);
 
-    let client = Client::new(&config.url, &config.model);
+    // Highlights are optional: a missing model must not block a release.
     let highlights = if commits.is_empty() {
         None
     } else {
-        if let Err(warning) = server::ensure_running(&config.url) {
-            eprintln!("sloth: warning: {warning}");
-        }
-        match release::generate_highlights(&client, &commits, &new_tag) {
-            Ok(highlights) => Some(highlights),
+        let client = match model::resolve_model(&config.model) {
+            Ok(path) => load_client(&path, &config.model),
             Err(error) => {
                 eprintln!("sloth: warning: highlights omitted: {error}");
                 None
             }
-        }
+        };
+        client.and_then(
+            |client| match release::generate_highlights(&client, &commits, &new_tag) {
+                Ok(highlights) => Some(highlights),
+                Err(error) => {
+                    eprintln!("sloth: warning: highlights omitted: {error}");
+                    None
+                }
+            },
+        )
     };
     let version_label = scheme.render_version(&new_version);
     let section = release::render_section_with_style(

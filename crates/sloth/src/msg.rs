@@ -125,16 +125,21 @@ fn type_names(style: &Style) -> Vec<String> {
 }
 
 fn subject_pattern(style: &Style) -> Option<String> {
+    // The length bound is folded into the pattern: llama.cpp checks a pattern
+    // before `maxLength` on the same field and returns early, so a separate
+    // `maxLength` next to a pattern is ignored. `.{1,N}` is the only bound the
+    // grammar can enforce.
+    let max = subject_max_length(style);
     match style.shape.as_str() {
-        // No nested alternation and no negated character classes: the Ollama
-        // grammar compiler silently drops those constraints.
+        // No nested alternation and no negated character classes: the grammar
+        // compiler silently drops unsupported regex constructs.
         "conventional" => {
             let types = type_names(style).join("|");
-            Some(format!(r"^({types})(\([a-z0-9._/-]+\))?!?: .+$"))
+            Some(format!(r"^({types})(\([a-z0-9._/-]+\))?!?: .{{1,{max}}}$"))
         }
-        "gitmoji" => Some(r"^:[a-z0-9_+-]+: .+$".to_string()),
-        "ticket" => Some(r"^[A-Z][A-Z0-9]+-[0-9]+:? .+$".to_string()),
-        "freeform" => Some(r"^.{1,72}$".to_string()),
+        "gitmoji" => Some(format!(r"^:[a-z0-9_+-]+: .{{1,{max}}}$")),
+        "ticket" => Some(format!(r"^[A-Z][A-Z0-9]+-[0-9]+:? .{{1,{max}}}$")),
+        "freeform" => Some(format!(r"^.{{1,{max}}}$")),
         _ => None,
     }
 }
@@ -163,10 +168,10 @@ pub fn body_max_length(style: &Style) -> usize {
 
 /// Build the structured-output schema for this repository.
 ///
-/// The `pattern` and the `maxLength` bounds are enforced by the model server's
-/// grammar compiler, not checked afterwards: a subject that breaks the
-/// repository's convention is unreachable, and a body that is too long cannot
-/// be written at all.
+/// The `pattern` (with the length bound folded in) and the `maxLength` bounds
+/// are compiled into a GBNF grammar by llama.cpp. The grammar sees raw JSON
+/// text, so it is a formatting nudge; `post_parse_failure` is the check on the
+/// decoded value.
 pub fn schema_for(style: &Style) -> Value {
     let Some(pattern) = subject_pattern(style) else {
         return static_schema();
@@ -644,7 +649,7 @@ fn scope_known_check(style: &Style, subject: &str) -> Check {
 
 fn length_check(style: &Style, subject: &str) -> Check {
     let p90 = style.subject_len.p90;
-    let limit = LENGTH_CEILING.max(p90);
+    let limit = subject_max_length(style);
     let length = subject.trim().chars().count();
     check(
         "length",
@@ -801,6 +806,109 @@ pub fn scope_warning(style: &Style, subject: &str, conformance: &Conformance) ->
         }
     }
     conformance.scope_warning()
+}
+
+/// The decoded-value guard behind the grammar.
+///
+/// A JSON-schema `pattern` is compiled over **raw JSON text**: GBNF's `.`
+/// becomes `[^\n\r]`, so `"feat: a\nb"` (a literal backslash-n escape in the
+/// JSON) passes the grammar and then decodes to a real newline. The grammar
+/// also measures raw bytes, not the decoded string. This check runs on the
+/// parsed, unescaped `subject` and `body` and is the actual guarantee; a
+/// failure is invalid output and goes down the repair-then-template path.
+pub fn post_parse_failure(style: &Style, subject: &str, body: &str) -> Option<Check> {
+    let (name, detail) = match subject_violation(style, subject) {
+        Some(detail) => ("subject_pattern", detail),
+        None => ("body_length", body_violation(style, body)?),
+    };
+    Some(Check {
+        name: name.to_string(),
+        pass: false,
+        detail,
+        hard: true,
+    })
+}
+
+/// The shape's full pattern (the same text the schema compiles), then the same
+/// length bound `length_check` uses.
+fn subject_violation(style: &Style, subject: &str) -> Option<String> {
+    if subject.contains('\n') || subject.contains('\r') {
+        return Some(
+            "subject contains a newline or carriage return; the grammar matched the raw JSON \
+             escapes, not the decoded value"
+                .to_string(),
+        );
+    }
+    match style.shape.as_str() {
+        "conventional" => {
+            let Some(parsed) = parse_conventional(subject) else {
+                return Some("expected `type(scope)!: description` (conventional)".to_string());
+            };
+            if !type_is_known(style, parsed.type_) {
+                return Some(format!(
+                    "type {:?} is not in this repository's type vocabulary",
+                    parsed.type_
+                ));
+            }
+            if let Some(scope) = parsed.scope {
+                let valid = !scope.is_empty()
+                    && scope.chars().all(|c| {
+                        c.is_ascii_lowercase()
+                            || c.is_ascii_digit()
+                            || matches!(c, '.' | '_' | '/' | '-')
+                    });
+                if !valid {
+                    return Some(format!("scope {scope:?} does not match `[a-z0-9._/-]+`"));
+                }
+            }
+            let prefix_len = subject.len() - parsed.subject.len();
+            if !subject[..prefix_len].ends_with(": ") {
+                return Some("the description must follow `: ` exactly".to_string());
+            }
+            if parsed.subject.is_empty() {
+                return Some("the subject description is empty".to_string());
+            }
+        }
+        "gitmoji" => {
+            let Some(emoji) = parse_gitmoji(subject) else {
+                return Some("expected a leading `:emoji:`".to_string());
+            };
+            let rest = &subject[emoji.len() + 2..];
+            if !rest.starts_with(' ') || rest.len() < 2 {
+                return Some("expected `:emoji: description`".to_string());
+            }
+        }
+        "ticket" => {
+            let Some(ticket) = parse_ticket(subject) else {
+                return Some("expected a leading TICKET-123 token".to_string());
+            };
+            let rest = &subject[ticket.len()..];
+            let rest = rest.strip_prefix(':').unwrap_or(rest);
+            if !rest.starts_with(' ') || rest.len() < 2 {
+                return Some("expected `TICKET-123: description`".to_string());
+            }
+        }
+        _ => {
+            if subject.trim().is_empty() {
+                return Some("the subject is empty".to_string());
+            }
+        }
+    }
+    let limit = subject_max_length(style);
+    let length = subject.trim().chars().count();
+    if length > limit {
+        return Some(format!(
+            "subject length {length} exceeds {limit} (72 ceiling, repo p90 {})",
+            style.subject_len.p90
+        ));
+    }
+    None
+}
+
+fn body_violation(style: &Style, body: &str) -> Option<String> {
+    let cap = body_max_length(style);
+    let length = body.chars().count();
+    (length > cap).then(|| format!("body length {length} exceeds the cap {cap}"))
 }
 
 pub fn repair_instruction(failures: &[&Check]) -> String {
@@ -1190,7 +1298,7 @@ mod tests {
             conventional["properties"]["subject"]["pattern"]
                 .as_str()
                 .expect("pattern"),
-            r"^(feat|fix|docs)(\([a-z0-9._/-]+\))?!?: .+$"
+            r"^(feat|fix|docs)(\([a-z0-9._/-]+\))?!?: .{1,72}$"
         );
         assert_eq!(
             conventional["required"],
@@ -1204,7 +1312,7 @@ mod tests {
             schema_for(&gitmoji)["properties"]["subject"]["pattern"]
                 .as_str()
                 .expect("pattern"),
-            r"^:[a-z0-9_+-]+: .+$"
+            r"^:[a-z0-9_+-]+: .{1,72}$"
         );
 
         let mut ticket = style();
@@ -1213,7 +1321,7 @@ mod tests {
             schema_for(&ticket)["properties"]["subject"]["pattern"]
                 .as_str()
                 .expect("pattern"),
-            r"^[A-Z][A-Z0-9]+-[0-9]+:? .+$"
+            r"^[A-Z][A-Z0-9]+-[0-9]+:? .{1,72}$"
         );
 
         let mut freeform = style();
@@ -1224,6 +1332,69 @@ mod tests {
                 .expect("pattern"),
             r"^.{1,72}$"
         );
+    }
+
+    #[test]
+    fn schema_folds_the_repo_length_bound_into_the_pattern() {
+        // `maxLength` next to a pattern is ignored by llama.cpp's grammar
+        // compiler, so the bound has to live inside the pattern itself.
+        let mut style = style();
+        style.subject_len.p90 = 100;
+        let schema = schema_for(&style);
+        let pattern = schema["properties"]["subject"]["pattern"]
+            .as_str()
+            .expect("pattern");
+        assert!(pattern.ends_with(".{1,100}$"), "{pattern}");
+        assert_eq!(schema["properties"]["subject"]["maxLength"], json!(100));
+    }
+
+    #[test]
+    fn post_parse_rejects_an_escaped_newline_in_the_subject() {
+        // The grammar's `.` does not match a raw newline, but the JSON escape
+        // `\n` is two ordinary characters in the raw text and decodes to one.
+        let failure = post_parse_failure(&style(), "feat(api): add endpoint\nsmuggled", "")
+            .expect("a decoded newline is rejected");
+        assert_eq!(failure.name, "subject_pattern");
+        assert!(failure.detail.contains("newline"), "{}", failure.detail);
+        assert!(failure.hard);
+    }
+
+    #[test]
+    fn post_parse_rejects_an_overlong_subject() {
+        let subject = format!("feat(api): {}", "a".repeat(80));
+        let failure = post_parse_failure(&style(), &subject, "").expect("too long is rejected");
+        assert!(failure.detail.contains("exceeds 72"), "{}", failure.detail);
+    }
+
+    #[test]
+    fn post_parse_rejects_a_bad_prefix() {
+        let failure =
+            post_parse_failure(&style(), "add an endpoint", "").expect("no prefix is rejected");
+        assert_eq!(failure.name, "subject_pattern");
+    }
+
+    #[test]
+    fn post_parse_rejects_a_body_over_the_cap() {
+        let mut style = style();
+        style.body_usage = 0.81;
+        style.body_p90_words = 10;
+        let failure = post_parse_failure(&style, "feat(api): add endpoint", &"x".repeat(301))
+            .expect("an over-cap body is rejected");
+        assert_eq!(failure.name, "body_length");
+        assert!(post_parse_failure(&style, "feat(api): add endpoint", &"x".repeat(300)).is_none());
+    }
+
+    #[test]
+    fn post_parse_accepts_a_valid_message() {
+        assert!(post_parse_failure(&style(), "feat(api): add export endpoint", "").is_none());
+        let mut with_bodies = style();
+        with_bodies.body_usage = 0.81;
+        assert!(post_parse_failure(
+            &with_bodies,
+            "feat(api): add export endpoint",
+            "Why it changed."
+        )
+        .is_none());
     }
 
     #[test]

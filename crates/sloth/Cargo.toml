@@ -7,6 +7,6 @@ license = "MIT"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+llama-cpp-2 = { version = "0.1.160", features = ["common"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "3", default-features = false }
