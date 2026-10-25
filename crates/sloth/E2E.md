@@ -1,7 +1,8 @@
 # End-to-end transcript
 
-Real runs of the built binary against a scratch repository, captured while the
-benchmark was running. Kept as evidence that the tool works, and as a record of
+Real runs of the built binary against a scratch repository. Recorded against the
+earlier HTTP/Ollama backend; the current binary embeds the model instead, and the
+CLI flow is unchanged. Kept as evidence that the tool works, and as a record of
 the defects these runs exposed.
 
 ## The scratch repository

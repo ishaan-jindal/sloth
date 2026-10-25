@@ -19,6 +19,10 @@ offline once the model is on disk.
 cargo install --path crates/sloth
 ```
 
+First install takes a few minutes: it compiles the embedded inference engine
+from source, so you need a C++ toolchain (`cmake`, `gcc`/`clang`, `ninja` or
+`make`). After that the binary is self-contained — model file aside.
+
 You need a local model file. Point Sloth at a GGUF on disk, or name a model you
 have already pulled — Sloth reads Ollama's local store directly, no server needed.
 
@@ -151,20 +155,14 @@ bench/            the benchmark, its protocol, its corpus and its results
 
 ## Status
 
-The benchmark is the load-bearing part: it establishes which model is good enough
-for which repository, and the honest answer is not the same for every repository.
-`bench/REPORT.md` will hold the measured numbers, including where small models fail.
+Shipped as v0.1.0: `sloth commit`, `sloth release` and `sloth prompt`, with the
+model embedded — no server, no port, no network.
 
-**The numbers do not exist yet.** The harness, the protocol and the corpus are
-finished, and the first arm ran far enough to show that a 0.6B model can reach 96%
-conformance against a repository's own convention — but the schema and the diff
-handling changed underneath it afterwards, so those rows were discarded rather than
-reported. Re-running the benchmark is the next step, and it is deliberately the
-last thing before this is finished rather than the first.
-
-Two things are still open: whether the benchmark should drive this binary directly
-instead of reimplementing it in Python, and the benchmark run itself, which is
-deliberately the last thing before this is finished rather than the first.
+`bench/` holds the benchmark harness, protocol and corpus (80 real commits from
+five repositories). It is finished scaffolding with no results: the benchmark was
+deliberately never run, so this project makes no claim about which model is good
+enough — only about the mechanism that makes a small model worth trying. If the
+numbers ever get measured, `bench/REPORT.md` is where they go.
 
 Known issues with the embedded backend, recorded rather than fixed:
 - Grammar-constrained generation runs ~35% slower than the same file through
